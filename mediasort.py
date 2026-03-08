@@ -84,7 +84,7 @@ TV_PATTERNS = [
     re.compile(r"[Ss](\d{1,2})[\.\s]?[Ee](\d{1,3})"),             # S01.E01
     re.compile(r"(\d{1,2})x(\d{1,3})", re.IGNORECASE),            # 1x01
     re.compile(r"[Ss]eason\s*(\d{1,2})\s*[Ee]pisode\s*(\d{1,3})", re.IGNORECASE),  # Season 4 Episode 01
-    re.compile(r"[\.\s](?!(?:19|20)\d{2}[\.\s])(\d{1,2})(\d{2})[\.\s](?!\d)"),  # .415. abbreviated (S04E15), skip years
+    re.compile(r"(?<![HhXx])[\.\s](?!(?:19|20)\d{2}[\.\s])(\d{1,2})(\d{2})[\.\s](?!\d)"),  # .415. abbreviated (S04E15), skip years and codecs (H.264, x265)
     re.compile(r"[Ss]eason[\s._-]*(\d{1,2})", re.IGNORECASE),     # Season 1
     re.compile(r"[\.\s][Ss](\d{1,2})[\.\s]"),                     # S01 (season pack, with delimiters)
 ]
