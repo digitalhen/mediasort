@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 mediasort - A CLI tool to organize media files into Plex-friendly directory structures.
 
@@ -1889,6 +1890,13 @@ def main():
     dry_run = not args.execute
     move = not args.copy
     probe = not args.no_probe
+
+    # Load config file defaults for TMDB keys if not provided via CLI/env
+    cfg = load_config()
+    if not args.tmdb_key and not os.environ.get("TMDB_API_KEY"):
+        args.tmdb_key = cfg.get("tmdb_api_key") or None
+    if not args.tmdb_token and not os.environ.get("TMDB_READ_TOKEN"):
+        args.tmdb_token = cfg.get("tmdb_read_token") or None
 
     # Print config header
     tmdb_status = "disabled"
