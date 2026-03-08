@@ -531,6 +531,35 @@ def bitrate_label(bitrate: int | None) -> str | None:
         return "Ultra"
 
 
+def _safe_transfer(src: str, dest: str, move: bool = True):
+    """Transfer a file using a .copying suffix to mark in-progress transfers.
+
+    Copies to dest.copying first, then renames to final name. If move=True,
+    deletes the source after successful transfer. This ensures incomplete
+    transfers are obvious and won't confuse media servers.
+    """
+    tmp_dest = dest + ".copying"
+    try:
+        # Same-device move can use os.rename directly (atomic)
+        if move:
+            try:
+                os.rename(src, dest)
+                return
+            except OSError:
+                pass  # Cross-device; fall through to copy+delete
+        shutil.copy2(src, tmp_dest)
+        os.rename(tmp_dest, dest)
+        if move:
+            os.remove(src)
+    except BaseException:
+        # Clean up partial copy on any failure
+        try:
+            os.remove(tmp_dest)
+        except OSError:
+            pass
+        raise
+
+
 def find_subtitle_files(video_path: str) -> list[dict]:
     """Find subtitle files associated with a video file.
 
@@ -989,18 +1018,12 @@ def process_file(
         if os.path.exists(action["dest"]):
             action["status"] = "exists"
         else:
-            if move:
-                shutil.move(filepath, action["dest"])
-            else:
-                shutil.copy2(filepath, action["dest"])
+            _safe_transfer(filepath, action["dest"], move=move)
             action["status"] = "done"
             # Also move/copy subtitles
             for sa in action.get("subtitles", []):
                 if not os.path.exists(sa["dest"]):
-                    if move:
-                        shutil.move(sa["source"], sa["dest"])
-                    else:
-                        shutil.copy2(sa["source"], sa["dest"])
+                    _safe_transfer(sa["source"], sa["dest"], move=move)
     elif action["dest"]:
         action["status"] = "dry_run"
 
@@ -1098,10 +1121,7 @@ def _execute_action(action: dict, move: bool) -> dict:
     if os.path.exists(action["dest"]):
         action["status"] = "exists"
     else:
-        if move:
-            shutil.move(action["source"], action["dest"])
-        else:
-            shutil.copy2(action["source"], action["dest"])
+        _safe_transfer(action["source"], action["dest"], move=move)
         action["status"] = "done"
     return action
 
