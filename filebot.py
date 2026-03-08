@@ -582,16 +582,45 @@ def is_game_release(path: str) -> bool:
     return False
 
 
+# Extensions that indicate a file is still being downloaded
+DOWNLOAD_MARKER_EXTS = {".part", ".!qb", ".aria2", ".downloading", ".crdownload", ".tmp"}
+
+
+def is_downloading(filepath: str) -> bool:
+    """Check if a file appears to still be downloading."""
+    # Check for download marker files alongside the video
+    for ext in DOWNLOAD_MARKER_EXTS:
+        if os.path.exists(filepath + ext):
+            return True
+    # Check if the file itself is a partial download
+    if os.path.splitext(filepath)[1].lower() in DOWNLOAD_MARKER_EXTS:
+        return True
+    return False
+
+
+def is_dir_downloading(dirpath: str) -> bool:
+    """Check if any files in a directory are still downloading."""
+    for _, _, files in os.walk(dirpath):
+        for f in files:
+            if os.path.splitext(f)[1].lower() in DOWNLOAD_MARKER_EXTS:
+                return True
+    return False
+
+
 def find_video_files(path: str) -> list[str]:
     """Recursively find all video files under a path."""
     videos = []
     if os.path.isfile(path):
-        if os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS:
+        if os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS and not is_downloading(path):
             videos.append(path)
         return videos
 
     # Skip game releases entirely
     if is_game_release(path):
+        return videos
+
+    # Skip directories with active downloads
+    if os.path.isdir(path) and is_dir_downloading(path):
         return videos
 
     for root, dirs, files in os.walk(path):
@@ -603,7 +632,9 @@ def find_video_files(path: str) -> list[str]:
         for f in sorted(files):
             ext = os.path.splitext(f)[1].lower()
             if ext in VIDEO_EXTENSIONS and not is_junk_file(f):
-                videos.append(os.path.join(root, f))
+                fp = os.path.join(root, f)
+                if not is_downloading(fp):
+                    videos.append(fp)
     return videos
 
 
