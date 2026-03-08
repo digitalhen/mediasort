@@ -1147,6 +1147,13 @@ def _execute_action(action: dict, move: bool) -> dict:
     else:
         _safe_transfer(action["source"], action["dest"], move=move)
         action["status"] = "done"
+        # Also move/copy associated subtitles
+        for sa in action.get("subtitles", []):
+            if not os.path.exists(sa["dest"]):
+                try:
+                    _safe_transfer(sa["source"], sa["dest"], move=move)
+                except OSError:
+                    pass
     return action
 
 
@@ -1160,17 +1167,47 @@ CLEANUP_JUNK_EXTENSIONS = {
 }
 
 
+def _is_metadata_dir(name: str) -> bool:
+    """Check if a directory is platform metadata (Synology @eaDir, macOS .DS_Store dirs, etc.)."""
+    return name in ("@eaDir", ".DS_Store", "__MACOSX", "Thumbs.db")
+
+
+def _rmtree_safe(path: str, dry_run: bool, cleaned: list[str]):
+    """Recursively remove a directory tree (for metadata dirs like @eaDir)."""
+    if dry_run:
+        cleaned.append(f"  \033[31m[RMTREE]\033[0m {path}")
+        return
+    import shutil
+    try:
+        shutil.rmtree(path)
+        cleaned.append(path)
+    except OSError:
+        pass
+
+
+def _dir_has_video(dirpath: str) -> bool:
+    """Check if a directory still contains any non-junk video files."""
+    for root, dirs, files in os.walk(dirpath):
+        dirs[:] = [d for d in dirs if not _is_metadata_dir(d)]
+        for f in files:
+            ext = os.path.splitext(f)[1].lower()
+            if ext in VIDEO_EXTENSIONS and not is_junk_file(f):
+                return True
+    return False
+
+
 def cleanup_source_dir(source_dir: str, moved_files: set[str], dry_run: bool = False) -> list[str]:
     """Clean up leftover junk files and empty directories after moving videos out.
 
     Only cleans subdirectories of source_dir where files were successfully moved.
+    When all videos have been moved out of a directory, ALL remaining files (including
+    subtitles) are considered orphaned and removed — they belong with the video.
     Returns list of cleaned paths.
     """
     cleaned = []
     # Find which top-level subdirectories had files moved
     affected_dirs = set()
     for f in moved_files:
-        parent = os.path.dirname(f)
         # Get the top-level subdir relative to source
         rel = os.path.relpath(f, source_dir)
         parts = rel.split(os.sep)
@@ -1180,15 +1217,29 @@ def cleanup_source_dir(source_dir: str, moved_files: set[str], dry_run: bool = F
                 affected_dirs.add(top_path)
 
     for d in sorted(affected_dirs):
+        # Check if any non-junk video files remain in this entry
+        has_remaining_video = _dir_has_video(d)
+
         # Walk bottom-up to delete files then empty dirs
         for root, dirs, files in os.walk(d, topdown=False):
+            # Remove metadata dirs like @eaDir first
+            for dirname in dirs:
+                if _is_metadata_dir(dirname):
+                    _rmtree_safe(os.path.join(root, dirname), dry_run, cleaned)
+
             for f in files:
                 fp = os.path.join(root, f)
                 if fp in moved_files:
                     continue  # Already moved
                 ext = os.path.splitext(f)[1].lower()
-                if ext in CLEANUP_KEEP_EXTENSIONS and not is_junk_file(f):
-                    continue  # Don't delete remaining video/subtitle files (unless junk)
+                # If no videos remain, everything is orphaned — clean it all
+                # If videos remain, only clean known junk (keep video + subtitle files)
+                if has_remaining_video:
+                    if ext in CLEANUP_KEEP_EXTENSIONS and not is_junk_file(f):
+                        continue  # Don't delete video/subtitle files that still have a purpose
+                else:
+                    if ext in VIDEO_EXTENSIONS and not is_junk_file(f):
+                        continue  # Safety: never delete non-junk video files
                 if dry_run:
                     cleaned.append(f"  \033[31m[DELETE]\033[0m {fp}")
                 else:
@@ -1197,10 +1248,11 @@ def cleanup_source_dir(source_dir: str, moved_files: set[str], dry_run: bool = F
                         cleaned.append(fp)
                     except OSError:
                         pass
-            # Remove empty directories
+            # Remove empty directories (including the entry dir itself)
             if not dry_run:
                 try:
-                    if not os.listdir(root):
+                    remaining = os.listdir(root)
+                    if not remaining:
                         os.rmdir(root)
                         cleaned.append(root)
                 except OSError:
@@ -1208,9 +1260,12 @@ def cleanup_source_dir(source_dir: str, moved_files: set[str], dry_run: bool = F
             else:
                 try:
                     remaining = [f for f in os.listdir(root)
-                                 if (os.path.splitext(f)[1].lower() in CLEANUP_KEEP_EXTENSIONS
-                                     and not is_junk_file(f))
-                                 or os.path.isdir(os.path.join(root, f))]
+                                 if not _is_metadata_dir(f)
+                                 and ((os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS
+                                       and not is_junk_file(f))
+                                      or (has_remaining_video
+                                          and os.path.splitext(f)[1].lower() in SUBTITLE_EXTENSIONS)
+                                      or os.path.isdir(os.path.join(root, f)))]
                     if not remaining:
                         cleaned.append(f"  \033[31m[RMDIR]\033[0m {root}")
                 except OSError:
@@ -1295,7 +1350,7 @@ def run_once(args) -> int:
 
     total = len(all_actions)
 
-    cleanup = getattr(args, "cleanup", False)
+    cleanup = getattr(args, "cleanup", False) or rename_mode
 
     if dry_run:
         for r in all_actions:
