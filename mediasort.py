@@ -346,7 +346,8 @@ def parse_filename(filename: str) -> dict:
         # Title is everything before the year
         title_part = title_part[: year_m.start()].strip()
 
-    result["title"] = title_case(title_part.strip(" .-_")) if title_part.strip(" .-_") else base
+    stripped = title_part.strip(" .-_")
+    result["title"] = title_case(stripped) if stripped else None
     return result
 
 
@@ -959,15 +960,8 @@ def process_file(
     }
 
     if not parsed["title"]:
-        action["status"] = "error"
-        action["error"] = "Could not parse title"
-        return action
-
-    # Reject titles that are just a number/year — these are bare filenames
-    # like "1941.avi" that would get false TMDB matches
-    if re.match(r"^\d{1,4}$", parsed["title"].strip()):
         action["status"] = "skipped"
-        action["error"] = f"Title is just a number: {parsed['title']}"
+        action["error"] = "Could not parse title"
         return action
 
     if parsed["type"] == "tv":
