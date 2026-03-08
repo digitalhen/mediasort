@@ -506,12 +506,12 @@ class TMDBClient:
 # File discovery & probing
 # ---------------------------------------------------------------------------
 
-def probe_bitrate(filepath: str) -> int | None:
+def probe_bitrate(filepath: str, timeout: int = 30) -> int | None:
     """Use ffprobe to get the overall bitrate of a video file. Returns bits/sec or None."""
     try:
         result = subprocess.run(
             ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", filepath],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=timeout,
         )
         if result.returncode == 0:
             info = json.loads(result.stdout)
@@ -536,6 +536,64 @@ def bitrate_label(bitrate: int | None) -> str | None:
         return "High"
     else:
         return "Ultra"
+
+
+# Minimum expected file sizes (bytes) per resolution — files smaller than this
+# for their claimed resolution are likely truncated or corrupt.
+_MIN_SIZE_BY_RESOLUTION = {
+    "2160p": 500_000_000,   # 500 MB
+    "1080p": 200_000_000,   # 200 MB
+    "720p":  100_000_000,   # 100 MB
+    "480p":   50_000_000,   #  50 MB
+}
+
+
+def check_truncated(filepath: str, resolution: str | None) -> str | None:
+    """Return a warning string if the file looks truncated for its resolution."""
+    if not resolution or resolution not in _MIN_SIZE_BY_RESOLUTION:
+        return None
+    try:
+        size = os.path.getsize(filepath)
+    except OSError:
+        return None
+    min_size = _MIN_SIZE_BY_RESOLUTION[resolution]
+    if size < min_size:
+        size_mb = size / 1_000_000
+        min_mb = min_size / 1_000_000
+        return "possibly truncated: %.0f MB for %s (expected >%.0f MB)" % (size_mb, resolution, min_mb)
+    return None
+
+
+def _title_similarity(a: str, b: str) -> float:
+    """Return a similarity ratio (0-1) between two title strings.
+
+    Uses a word-overlap metric with stemming: size of intersection / size of union
+    of lowercased word sets, ignoring small words. Stems words by stripping
+    common suffixes so "Alien" matches "Aliens".
+    """
+    ignore = {"a", "an", "the", "and", "of", "in", "on", "at", "to", "for", "is", "&"}
+    def stem(w):
+        w = w.lower()
+        # Very simple stemming: strip trailing s/es/ed/ing for matching
+        for suffix in ("ing", "es", "ed", "s"):
+            if len(w) > len(suffix) + 2 and w.endswith(suffix):
+                return w[:-len(suffix)]
+        return w
+    def words(s):
+        return {stem(w) for w in re.sub(r"[^\w\s]", " ", s).split() if w.lower() not in ignore and len(w) > 1}
+    wa, wb = words(a), words(b)
+    if not wa or not wb:
+        return 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def check_tmdb_mismatch(parsed_title: str, matched_title: str) -> str | None:
+    """Return a warning if the TMDB match looks suspicious."""
+    sim = _title_similarity(parsed_title, matched_title)
+    if sim < 0.4:
+        return "TMDB match may be wrong: '%s' -> '%s' (similarity %.0f%%)" % (
+            parsed_title, matched_title, sim * 100)
+    return None
 
 
 def _file_fingerprint(path: str) -> tuple[int, bytes]:
@@ -940,6 +998,7 @@ def process_file(
     dry_run: bool = True,
     move: bool = True,
     probe: bool = True,
+    probe_timeout: int = 30,
     movie_template: str | None = None,
     tv_template: str | None = None,
 ) -> dict:
@@ -952,7 +1011,7 @@ def process_file(
 
     # Probe bitrate from actual file
     if probe:
-        br = probe_bitrate(filepath)
+        br = probe_bitrate(filepath, timeout=probe_timeout)
         if br is not None:
             parsed["bitrate"] = br
             parsed["bitrate_label"] = bitrate_label(br)
@@ -963,7 +1022,13 @@ def process_file(
         "parsed": parsed,
         "status": "skipped",
         "matched": None,
+        "warnings": [],
     }
+
+    # Check for truncated files
+    trunc_warning = check_truncated(filepath, parsed.get("resolution"))
+    if trunc_warning:
+        action["warnings"].append(trunc_warning)
 
     if not parsed["title"]:
         action["status"] = "skipped"
@@ -979,7 +1044,11 @@ def process_file(
         if tmdb:
             tv_result = tmdb.search_tv(show_title, parsed.get("year"))
             if tv_result:
-                show_title = tv_result.get("name", show_title)
+                matched_name = tv_result.get("name", show_title)
+                mismatch = check_tmdb_mismatch(parsed["title"], matched_name)
+                if mismatch:
+                    action["warnings"].append(mismatch)
+                show_title = matched_name
                 action["matched"] = show_title
 
                 if parsed["season"] and parsed["episode"]:
@@ -1006,7 +1075,11 @@ def process_file(
         if tmdb:
             movie_result = tmdb.search_movie(movie_title, movie_year)
             if movie_result:
-                movie_title = movie_result.get("title", movie_title)
+                matched_name = movie_result.get("title", movie_title)
+                mismatch = check_tmdb_mismatch(parsed["title"], matched_name)
+                if mismatch:
+                    action["warnings"].append(mismatch)
+                movie_title = matched_name
                 tmdb_id = movie_result.get("id")
                 rd = movie_result.get("release_date", "")
                 if rd and len(rd) >= 4:
@@ -1018,7 +1091,11 @@ def process_file(
                 if parent_title and parent_title != movie_title:
                     movie_result = tmdb.search_movie(parent_title, movie_year)
                     if movie_result:
-                        movie_title = movie_result.get("title", parent_title)
+                        matched_name = movie_result.get("title", parent_title)
+                        mismatch = check_tmdb_mismatch(parent_title, matched_name)
+                        if mismatch:
+                            action["warnings"].append(mismatch)
+                        movie_title = matched_name
                         tmdb_id = movie_result.get("id")
                         rd = movie_result.get("release_date", "")
                         if rd and len(rd) >= 4:
@@ -1036,6 +1113,17 @@ def process_file(
         return action
 
     log.debug("PLAN: %s -> %s (matched=%s)", filepath, action["dest"], action.get("matched"))
+
+    # Duplicate detection: check if dest folder already has video files
+    if action["dest"]:
+        dest_dir = os.path.dirname(action["dest"])
+        if os.path.isdir(dest_dir):
+            existing = [f for f in os.listdir(dest_dir)
+                        if os.path.splitext(f)[1].lower() in VIDEO_EXTENSIONS
+                        and os.path.basename(action["dest"]) != f]
+            if existing:
+                action["warnings"].append(
+                    "destination already has video: %s" % ", ".join(existing[:3]))
 
     # Find associated subtitle files
     if action["dest"]:
@@ -1076,6 +1164,24 @@ def _try_parent_title(filepath: str) -> str | None:
     return None
 
 
+def _is_collection_dir(entry_path: str, videos: list[str]) -> bool:
+    """Detect if a directory contains multiple distinct movies (a collection).
+
+    Heuristic: if a directory has 2+ video files that each live in their own
+    immediate subdirectory (or are large enough to be features), and the
+    filenames parse to different titles, it's likely a collection.
+    """
+    if not os.path.isdir(entry_path) or len(videos) < 2:
+        return False
+    titles = set()
+    for vf in videos:
+        parsed = parse_filename(os.path.basename(vf))
+        if parsed["title"] and parsed["type"] == "movie":
+            titles.add(parsed["title"].lower())
+    # If we found multiple distinct movie titles, it's a collection
+    return len(titles) >= 2
+
+
 def process_directory_entry(
     entry_path: str,
     movie_dest: str,
@@ -1084,16 +1190,30 @@ def process_directory_entry(
     dry_run: bool = True,
     move: bool = True,
     probe: bool = True,
+    probe_timeout: int = 30,
     movie_template: str | None = None,
     tv_template: str | None = None,
 ) -> list[dict]:
-    """Process a top-level directory entry (file or folder) from the source."""
+    """Process a top-level directory entry (file or folder) from the source.
+
+    Detects collection directories (multiple distinct movies in one folder)
+    and processes each movie individually rather than inheriting the folder title.
+    """
     videos = find_video_files(entry_path)
     results = []
 
+    is_collection = _is_collection_dir(entry_path, videos)
+    if is_collection:
+        log.info("COLLECTION detected: %s (%d videos)", os.path.basename(entry_path), len(videos))
+
     for vf in videos:
         result = process_file(vf, movie_dest, tv_dest, tmdb, dry_run, move, probe=probe,
+                              probe_timeout=probe_timeout,
                               movie_template=movie_template, tv_template=tv_template)
+        if is_collection:
+            result.setdefault("warnings", [])
+            if not any("collection" in w.lower() for w in result["warnings"]):
+                result["warnings"].append("from collection: %s" % os.path.basename(entry_path))
         results.append(result)
 
     return results
@@ -1131,6 +1251,9 @@ def print_result(r: dict, verbose: bool = False):
     else:
         error = r.get("error", "")
         print(f"  {color}[{status}]{reset} {src_display} ({error})")
+
+    for w in r.get("warnings", []):
+        print(f"          \033[33m⚠ {w}\033[0m")
 
     if verbose and r.get("parsed"):
         print(f"          parsed: {r['parsed']}")
@@ -1290,6 +1413,45 @@ def cleanup_source_dir(source_dir: str, moved_files: set[str], dry_run: bool = F
     return cleaned
 
 
+def _normalize_show_name(name: str) -> str:
+    """Normalize a TV show folder name for dedup comparison.
+
+    Strips dots, underscores, season suffixes, and noise to find the canonical name.
+    """
+    # Remove {tmdb-...} tags
+    n = re.sub(r"\{[^}]+\}", "", name)
+    # Replace dots/underscores with spaces
+    n = re.sub(r"[._]", " ", n)
+    # Strip trailing season indicators like "S01", "S01-S08", "Season 1", "Complete"
+    n = re.sub(r"\s+[Ss]\d{1,2}([- ][Ss]\d{1,2})?(\s|$).*", "", n)
+    n = re.sub(r"\s+[Ss]eason\s*\d+.*", "", n, flags=re.IGNORECASE)
+    n = re.sub(r"\s+Complete.*", "", n, flags=re.IGNORECASE)
+    # Strip noise tags
+    for pat in NOISE_PATTERNS:
+        n = pat.sub(" ", n)
+    n = re.sub(r"\s+", " ", n).strip().lower()
+    return n
+
+
+def find_duplicate_tv_folders(tv_dir: str) -> list[tuple[str, list[str]]]:
+    """Find TV show folders that likely refer to the same show.
+
+    Returns list of (canonical_name, [folder_names]) for groups with 2+ folders.
+    """
+    if not os.path.isdir(tv_dir):
+        return []
+    groups: dict[str, list[str]] = {}
+    for name in os.listdir(tv_dir):
+        if not os.path.isdir(os.path.join(tv_dir, name)):
+            continue
+        if name.startswith(".") or _is_metadata_dir(name):
+            continue
+        canonical = _normalize_show_name(name)
+        if canonical:
+            groups.setdefault(canonical, []).append(name)
+    return [(k, v) for k, v in sorted(groups.items()) if len(v) >= 2]
+
+
 def check_paths_accessible(*paths: str) -> list[str]:
     """Check that all paths exist and are accessible. Returns list of errors."""
     errors = []
@@ -1352,10 +1514,13 @@ def run_once(args) -> int:
     all_actions = []
     matched = 0
 
+    probe_timeout = getattr(args, "probe_timeout", 30)
+
     for entry in entries:
         entry_path = os.path.join(args.source, entry)
         results = process_directory_entry(entry_path, args.movies, args.tv, tmdb,
                                           dry_run=True, move=move, probe=probe,
+                                          probe_timeout=probe_timeout,
                                           movie_template=movie_template, tv_template=tv_template)
         if not results:
             continue
@@ -1436,6 +1601,23 @@ def run_once(args) -> int:
         if skipped:
             print(f"  skipped: {skipped}")
 
+    # Warning summary
+    all_warnings = [(r, w) for r in all_actions for w in r.get("warnings", [])]
+    if all_warnings:
+        print()
+        print(f"\033[33mWarnings ({len(all_warnings)}):\033[0m")
+        for r, w in all_warnings:
+            print(f"  {os.path.basename(r['source'])}: {w}")
+
+    # TV folder consolidation check
+    tv_dir = args.tv
+    dupes = find_duplicate_tv_folders(tv_dir)
+    if dupes:
+        print()
+        print(f"\033[33mTV folder duplicates ({len(dupes)} groups):\033[0m")
+        for canonical, folders in dupes:
+            print(f"  '{canonical}': {', '.join(folders)}")
+
     return total
 
 
@@ -1493,6 +1675,7 @@ def main():
     parser.add_argument("--tmdb-token", default=None, help="TMDB read access token (or set TMDB_READ_TOKEN env var)")
     parser.add_argument("--no-tmdb", action="store_true", help="Skip TMDB lookups, use filename parsing only")
     parser.add_argument("--no-probe", action="store_true", help="Skip ffprobe bitrate detection (faster)")
+    parser.add_argument("--probe-timeout", type=int, default=30, help="ffprobe timeout in seconds (default: 30, increase for NAS)")
     parser.add_argument("--dry-run", "-n", action="store_true", default=True, help="Show what would happen without moving files (default)")
     parser.add_argument("--execute", "-x", action="store_true", help="Actually move files (disables dry-run)")
     parser.add_argument("--copy", "-c", action="store_true", help="Copy instead of move")
