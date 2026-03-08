@@ -25,10 +25,13 @@ import urllib.parse
 import urllib.request
 
 TMDB_BASE = "https://api.themoviedb.org/3"
+OPENSUBTITLES_BASE = "https://api.opensubtitles.com/api/v1"
+
 VIDEO_EXTENSIONS = {
     ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm",
     ".m4v", ".mpg", ".mpeg", ".ts", ".m2ts", ".vob",
 }
+SUBTITLE_EXTENSIONS = {".srt", ".sub", ".ass", ".ssa", ".idx"}
 
 # Filenames to skip (junk/promo files inside torrent folders)
 JUNK_BASENAMES = {
