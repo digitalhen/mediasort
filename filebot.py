@@ -12,10 +12,13 @@ Plex formats:
 
 import argparse
 import concurrent.futures
+import hashlib
 import json
+import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -25,6 +28,18 @@ import urllib.parse
 import urllib.request
 
 TMDB_BASE = "https://api.themoviedb.org/3"
+
+# Default format templates (Plex conventions)
+DEFAULT_MOVIE_FORMAT = "{title} ({year}) {{tmdb-{tmdb_id}}} {{edition-{edition}}}/{title} ({year}) {{edition-{edition}}} - {quality}{ext}"
+DEFAULT_MOVIE_FORMAT_NO_EDITION = "{title} ({year}) {{tmdb-{tmdb_id}}}/{title} ({year}) - {quality}{ext}"
+DEFAULT_MOVIE_FORMAT_NO_TMDB = "{title} ({year})/{title} ({year}) - {quality}{ext}"
+DEFAULT_TV_FORMAT = "{show}/{season_folder}/{show} - S{season:02d}E{episode:02d} - {episode_title} - {quality}{ext}"
+DEFAULT_TV_FORMAT_NO_EPISODE_TITLE = "{show}/{season_folder}/{show} - S{season:02d}E{episode:02d} - {quality}{ext}"
+
+# Persistent TMDB disk cache directory
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".filebot", "cache")
+
+log = logging.getLogger("filebot")
 
 VIDEO_EXTENSIONS = {
     ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm",
@@ -357,11 +372,38 @@ def _title_alternatives(title: str) -> list[str]:
 
 
 class TMDBClient:
-    def __init__(self, api_key: str, bearer_token: str | None = None):
+    def __init__(self, api_key: str, bearer_token: str | None = None, cache_dir: str | None = None):
         self.api_key = api_key
         self.bearer_token = bearer_token
-        self._cache: dict[str, any] = {}
+        self._mem_cache: dict[str, any] = {}
         self._last_request = 0.0
+        self._cache_dir = cache_dir or CACHE_DIR
+        self._lock = threading.Lock()
+        os.makedirs(self._cache_dir, exist_ok=True)
+
+    def _disk_cache_path(self, url: str) -> str:
+        h = hashlib.sha256(url.encode()).hexdigest()[:16]
+        return os.path.join(self._cache_dir, f"{h}.json")
+
+    def _disk_cache_get(self, url: str) -> dict | None:
+        path = self._disk_cache_path(url)
+        try:
+            if os.path.exists(path):
+                age = time.time() - os.path.getmtime(path)
+                if age < 86400 * 7:  # 7-day TTL
+                    with open(path) as f:
+                        return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+        return None
+
+    def _disk_cache_set(self, url: str, data: dict):
+        try:
+            path = self._disk_cache_path(url)
+            with open(path, "w") as f:
+                json.dump(data, f)
+        except OSError:
+            pass
 
     def _get(self, path: str, params: dict | None = None) -> dict:
         if params is None:
@@ -375,20 +417,27 @@ class TMDBClient:
 
         url = f"{TMDB_BASE}{path}?{urllib.parse.urlencode(params)}"
 
-        if url in self._cache:
-            return self._cache[url]
+        if url in self._mem_cache:
+            return self._mem_cache[url]
+
+        disk = self._disk_cache_get(url)
+        if disk is not None:
+            self._mem_cache[url] = disk
+            return disk
 
         # Rate limiting: max ~4 requests/sec
-        elapsed = time.time() - self._last_request
-        if elapsed < 0.25:
-            time.sleep(0.25 - elapsed)
+        with self._lock:
+            elapsed = time.time() - self._last_request
+            if elapsed < 0.25:
+                time.sleep(0.25 - elapsed)
+            self._last_request = time.time()
 
         req = urllib.request.Request(url, headers=headers)
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode())
-                self._cache[url] = data
-                self._last_request = time.time()
+                self._mem_cache[url] = data
+                self._disk_cache_set(url, data)
                 return data
         except urllib.error.HTTPError as e:
             if e.code == 429:
@@ -700,26 +749,29 @@ def _quality_suffix(parsed: dict) -> str:
 
 def format_movie_path(dest: str, title: str, year: int | None, ext: str,
                       tmdb_id: int | None = None, edition: str | None = None,
-                      parsed: dict | None = None) -> str:
+                      parsed: dict | None = None, template: str | None = None) -> str:
     title_s = sanitize(title)
+    quality = _quality_suffix(parsed) if parsed else ""
+
+    if template:
+        return _apply_template(template, dest, title=title_s, year=year, ext=ext,
+                               tmdb_id=tmdb_id, edition=edition, quality=quality, parsed=parsed)
+
     if year:
         base = f"{title_s} ({year})"
     else:
         base = title_s
 
-    # Folder includes tmdb ID
     folder = base
     if tmdb_id:
         folder = f"{base} {{tmdb-{tmdb_id}}}"
     if edition:
         folder = f"{folder} {{edition-{edition}}}"
 
-    # Filename includes edition and quality tags but not tmdb ID
     filename_base = base
     if edition:
         filename_base = f"{base} {{edition-{edition}}}"
 
-    quality = _quality_suffix(parsed) if parsed else ""
     if quality:
         filename = f"{filename_base} - {quality}{ext}"
     else:
@@ -729,21 +781,83 @@ def format_movie_path(dest: str, title: str, year: int | None, ext: str,
 
 def format_tv_path(dest: str, show: str, season: int, episode: int,
                    episode_title: str | None, ext: str,
-                   parsed: dict | None = None) -> str:
-    show = sanitize(show)
-    season_folder = f"Season {season:02d}"
+                   parsed: dict | None = None, template: str | None = None) -> str:
+    show_s = sanitize(show)
     quality = _quality_suffix(parsed) if parsed else ""
 
+    if template:
+        return _apply_template(template, dest, show=show_s, season=season, episode=episode,
+                               episode_title=sanitize(episode_title) if episode_title else None,
+                               ext=ext, quality=quality, parsed=parsed)
+
+    season_folder = f"Season {season:02d}"
     if episode_title:
-        name = f"{show} - S{season:02d}E{episode:02d} - {sanitize(episode_title)}"
+        name = f"{show_s} - S{season:02d}E{episode:02d} - {sanitize(episode_title)}"
     else:
-        name = f"{show} - S{season:02d}E{episode:02d}"
+        name = f"{show_s} - S{season:02d}E{episode:02d}"
 
     if quality:
         filename = f"{name} - {quality}{ext}"
     else:
         filename = f"{name}{ext}"
-    return os.path.join(dest, show, season_folder, filename)
+    return os.path.join(dest, show_s, season_folder, filename)
+
+
+def _apply_template(template: str, dest: str, **kwargs) -> str:
+    """Apply a format template with variable substitution.
+
+    Available variables: {title}, {year}, {tmdb_id}, {edition}, {show},
+    {season}, {episode}, {episode_title}, {quality}, {resolution}, {source},
+    {vcodec}, {acodec}, {bitrate_label}, {ext}, {season_folder}
+    """
+    parsed = kwargs.pop("parsed", None) or {}
+    vals = {
+        "title": kwargs.get("title", ""),
+        "year": kwargs.get("year") or "",
+        "tmdb_id": kwargs.get("tmdb_id") or "",
+        "edition": kwargs.get("edition") or "",
+        "show": kwargs.get("show", ""),
+        "season": kwargs.get("season") or 0,
+        "episode": kwargs.get("episode") or 0,
+        "episode_title": kwargs.get("episode_title") or "",
+        "quality": kwargs.get("quality", ""),
+        "resolution": parsed.get("resolution", ""),
+        "source": parsed.get("source", ""),
+        "vcodec": parsed.get("video_codec", ""),
+        "acodec": parsed.get("audio_codec", ""),
+        "bitrate_label": parsed.get("bitrate_label", ""),
+        "ext": kwargs.get("ext", ""),
+        "season_folder": f"Season {(kwargs.get('season') or 0):02d}",
+    }
+
+    # Handle conditional blocks: {?edition:text {edition} text}
+    def replace_conditional(m):
+        var_name = m.group(1)
+        content = m.group(2)
+        if vals.get(var_name):
+            # Substitute vars inside the conditional
+            return content.format_map(_SafeDict(vals))
+        return ""
+
+    result = re.sub(r"\{\?(\w+):([^}]*(?:\{[^}]*\}[^}]*)*)\}", replace_conditional, template)
+
+    # Substitute remaining variables
+    result = result.format_map(_SafeDict(vals))
+
+    # Clean up doubled spaces and trailing separators
+    result = re.sub(r"  +", " ", result)
+    result = re.sub(r" - (\.|$)", r"\1", result)
+    result = re.sub(r"/\s+", "/", result)
+    result = re.sub(r"\s+/", "/", result)
+
+    return os.path.join(dest, result.strip())
+
+
+class _SafeDict(dict):
+    """Dict that returns empty string for missing keys in format_map."""
+    def __missing__(self, key):
+        # Support format specs like {season:02d}
+        return ""
 
 
 def format_tv_season_pack_path(dest: str, show: str) -> str:
@@ -763,6 +877,8 @@ def process_file(
     dry_run: bool = True,
     move: bool = True,
     probe: bool = True,
+    movie_template: str | None = None,
+    tv_template: str | None = None,
 ) -> dict:
     """
     Process a single video file. Returns a dict describing the action taken.
@@ -808,7 +924,7 @@ def process_file(
                         episode_title = ep_data.get("name")
 
         if parsed["season"] is not None and parsed["episode"] is not None:
-            dest_path = format_tv_path(tv_dest, show_title, parsed["season"], parsed["episode"], episode_title, parsed["ext"], parsed=parsed)
+            dest_path = format_tv_path(tv_dest, show_title, parsed["season"], parsed["episode"], episode_title, parsed["ext"], parsed=parsed, template=tv_template)
         elif parsed["season"] is not None:
             # Season pack — just move into show/season folder
             dest_path = os.path.join(tv_dest, sanitize(show_title), f"Season {parsed['season']:02d}", filename)
@@ -846,7 +962,8 @@ def process_file(
                         action["matched"] = f"{movie_title} ({movie_year})" if movie_year else movie_title
 
         dest_path = format_movie_path(movie_dest, movie_title, movie_year, parsed["ext"],
-                                      tmdb_id=tmdb_id, edition=edition, parsed=parsed)
+                                      tmdb_id=tmdb_id, edition=edition, parsed=parsed,
+                                      template=movie_template)
         action["dest"] = dest_path
     else:
         action["status"] = "skipped"
@@ -906,13 +1023,16 @@ def process_directory_entry(
     dry_run: bool = True,
     move: bool = True,
     probe: bool = True,
+    movie_template: str | None = None,
+    tv_template: str | None = None,
 ) -> list[dict]:
     """Process a top-level directory entry (file or folder) from the source."""
     videos = find_video_files(entry_path)
     results = []
 
     for vf in videos:
-        result = process_file(vf, movie_dest, tv_dest, tmdb, dry_run, move, probe=probe)
+        result = process_file(vf, movie_dest, tv_dest, tmdb, dry_run, move, probe=probe,
+                              movie_template=movie_template, tv_template=tv_template)
         results.append(result)
 
     return results
@@ -983,30 +1103,37 @@ def _execute_action(action: dict, move: bool) -> dict:
     return action
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        prog="filebot",
-        description="Organize media files into Plex-friendly directory structures.",
-    )
-    parser.add_argument("source", help="Source directory containing disorganized media files")
-    parser.add_argument("--movies", "-m", default="/Volumes/Movies", help="Destination for movies (default: /Volumes/Movies)")
-    parser.add_argument("--tv", "-t", default="/Volumes/TV", help="Destination for TV shows (default: /Volumes/TV)")
-    parser.add_argument("--tmdb-key", "-k", default=None, help="TMDB API key (or set TMDB_API_KEY env var)")
-    parser.add_argument("--tmdb-token", default=None, help="TMDB read access token (or set TMDB_READ_TOKEN env var)")
-    parser.add_argument("--no-tmdb", action="store_true", help="Skip TMDB lookups, use filename parsing only")
-    parser.add_argument("--no-probe", action="store_true", help="Skip ffprobe bitrate detection (faster)")
-    parser.add_argument("--dry-run", "-n", action="store_true", default=True, help="Show what would happen without moving files (default)")
-    parser.add_argument("--execute", "-x", action="store_true", help="Actually move files (disables dry-run)")
-    parser.add_argument("--copy", "-c", action="store_true", help="Copy instead of move")
-    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed parsing info")
-    parser.add_argument("--filter", "-f", default=None, help="Only process entries matching this substring")
-    parser.add_argument("--parallel", "-j", type=int, default=5, help="Max parallel file operations (default: 5)")
+def check_paths_accessible(*paths: str) -> list[str]:
+    """Check that all paths exist and are accessible. Returns list of errors."""
+    errors = []
+    for p in paths:
+        if not os.path.exists(p):
+            errors.append(f"Path does not exist: {p}")
+        elif os.path.isdir(p) and not os.access(p, os.R_OK):
+            errors.append(f"Path not readable: {p}")
+    return errors
 
-    args = parser.parse_args()
 
+def run_once(args) -> int:
+    """Run a single scan+process cycle. Returns number of files processed."""
     dry_run = not args.execute
     move = not args.copy
     probe = not args.no_probe
+
+    # Rename mode: organize within source directory
+    rename_mode = getattr(args, "rename", False)
+    if rename_mode:
+        args.movies = args.source
+        args.tv = args.source
+
+    # Check path accessibility
+    errors = check_paths_accessible(args.source)
+    if not dry_run and not rename_mode:
+        errors += check_paths_accessible(args.movies, args.tv)
+    if errors:
+        for e in errors:
+            log.error(e)
+        return 0
 
     # TMDB setup
     tmdb = None
@@ -1015,44 +1142,34 @@ def main():
         bearer_token = args.tmdb_token or os.environ.get("TMDB_READ_TOKEN")
         if api_key or bearer_token:
             tmdb = TMDBClient(api_key or "", bearer_token)
-            print("TMDB lookup: enabled")
-        else:
-            print("TMDB lookup: disabled (set TMDB_API_KEY or use --tmdb-key)")
-    else:
-        print("TMDB lookup: disabled")
 
-    if dry_run:
-        print("Mode: DRY RUN (use -x to execute)")
-    else:
-        action_word = "MOVE" if move else "COPY"
-        print(f"Mode: {action_word} (parallel: {args.parallel})")
-
-    if not probe:
-        print("Bitrate probe: disabled")
-
-    print(f"Source: {args.source}")
-    print(f"Movies -> {args.movies}")
-    print(f"TV     -> {args.tv}")
-    print()
-
-    if not os.path.exists(args.source):
-        print(f"Error: source path does not exist: {args.source}", file=sys.stderr)
-        sys.exit(1)
+    # Format templates
+    movie_template = args.movie_format if args.movie_format else None
+    tv_template = args.tv_format if args.tv_format else None
 
     # Get top-level entries
-    entries = sorted(os.listdir(args.source))
+    try:
+        entries = sorted(os.listdir(args.source))
+    except PermissionError:
+        log.error(f"Permission denied reading source: {args.source}")
+        return 0
+    except OSError as e:
+        log.error(f"Cannot read source directory: {e}")
+        return 0
+
     if args.filter:
         filt = args.filter.lower()
         entries = [e for e in entries if filt in e.lower() or filt in e.replace(".", " ").lower()]
 
-    # Phase 1: Plan — process all entries, build action list
+    # Phase 1: Plan
     all_actions = []
     matched = 0
 
     for entry in entries:
         entry_path = os.path.join(args.source, entry)
         results = process_directory_entry(entry_path, args.movies, args.tv, tmdb,
-                                          dry_run=True, move=move, probe=probe)
+                                          dry_run=True, move=move, probe=probe,
+                                          movie_template=movie_template, tv_template=tv_template)
         if not results:
             continue
         for r in results:
@@ -1063,7 +1180,6 @@ def main():
     total = len(all_actions)
 
     if dry_run:
-        # Dry run: just print everything
         for r in all_actions:
             print_result(r, args.verbose)
         print()
@@ -1071,18 +1187,15 @@ def main():
         if total:
             print(f"TMDB matched: {matched}/{total} ({matched/total*100:.1f}%)")
     else:
-        # Execute: move/copy with parallel workers and progress bar
-        print(f"Processing {total} files...")
-        print()
-
-        # Print planned actions first
+        if total:
+            log.info(f"Processing {total} files...")
         for r in all_actions:
             print_result(r, args.verbose)
 
-        print()
         stats = {"done": 0, "exists": 0, "error": 0}
         lock = threading.Lock()
         done_count = 0
+        is_interactive = sys.stderr.isatty()
 
         def do_action(action):
             nonlocal done_count
@@ -1095,11 +1208,11 @@ def main():
             with lock:
                 done_count += 1
                 stats[result["status"]] = stats.get(result["status"], 0) + 1
-                _print_progress(done_count, total)
+                if is_interactive:
+                    _print_progress(done_count, total)
             return result
 
         actionable = [a for a in all_actions if a["dest"] and a["status"] == "dry_run"]
-        # Override status for execution
         for a in actionable:
             a["status"] = "pending"
 
@@ -1107,9 +1220,7 @@ def main():
             futures = [pool.submit(do_action, a) for a in actionable]
             concurrent.futures.wait(futures)
 
-        # Count non-actionable items
         skipped = total - len(actionable)
-
         print()
         print(f"Total: {total} files")
         if total:
@@ -1119,6 +1230,630 @@ def main():
                 print(f"  {k}: {v}")
         if skipped:
             print(f"  skipped: {skipped}")
+
+    return total
+
+
+# ---------------------------------------------------------------------------
+# Web UI
+# ---------------------------------------------------------------------------
+
+import http.server
+import io
+
+CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".filebot", "config.json")
+
+def load_config() -> dict:
+    """Load persistent config from disk."""
+    defaults = {
+        "source": "/Volumes/Torrents",
+        "movies_dest": "/Volumes/Movies",
+        "tv_dest": "/Volumes/TV",
+        "tmdb_api_key": os.environ.get("TMDB_API_KEY", ""),
+        "tmdb_read_token": os.environ.get("TMDB_READ_TOKEN", ""),
+        "use_tmdb": True,
+        "use_probe": True,
+        "execute": False,
+        "copy_mode": False,
+        "rename_mode": False,
+        "parallel": 5,
+        "movie_format": "",
+        "tv_format": "",
+        "watch_interval": 0,
+        "filter": "",
+    }
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE) as f:
+                saved = json.load(f)
+                defaults.update(saved)
+    except (OSError, json.JSONDecodeError):
+        pass
+    return defaults
+
+
+def save_config(cfg: dict):
+    """Save config to disk."""
+    os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(cfg, f, indent=2)
+
+
+def _config_to_args(cfg: dict):
+    """Convert config dict to an argparse-like namespace."""
+    ns = argparse.Namespace()
+    ns.source = cfg["source"]
+    ns.movies = cfg["movies_dest"]
+    ns.tv = cfg["tv_dest"]
+    ns.tmdb_key = cfg.get("tmdb_api_key") or None
+    ns.tmdb_token = cfg.get("tmdb_read_token") or None
+    ns.no_tmdb = not cfg.get("use_tmdb", True)
+    ns.no_probe = not cfg.get("use_probe", True)
+    ns.execute = cfg.get("execute", False)
+    ns.copy = cfg.get("copy_mode", False)
+    ns.rename = cfg.get("rename_mode", False)
+    ns.verbose = False
+    ns.filter = cfg.get("filter") or None
+    ns.parallel = cfg.get("parallel", 5)
+    ns.movie_format = cfg.get("movie_format") or None
+    ns.tv_format = cfg.get("tv_format") or None
+    ns.watch = cfg.get("watch_interval") or None
+    ns.log_level = "INFO"
+    return ns
+
+
+WEB_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>filebot</title>
+<style>
+:root { --bg: #0f0f0f; --card: #1a1a1a; --border: #2a2a2a; --text: #e0e0e0; --muted: #888; --accent: #4a9eff; --accent2: #34d399; --danger: #ef4444; --warn: #f59e0b; }
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.5; }
+.container { max-width: 900px; margin: 0 auto; padding: 20px; }
+h1 { font-size: 1.5rem; margin-bottom: 20px; display: flex; align-items: center; gap: 10px; }
+h1 span { color: var(--accent); }
+h2 { font-size: 1rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin: 20px 0 10px; }
+.card { background: var(--card); border: 1px solid var(--border); border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+@media (max-width: 600px) { .grid { grid-template-columns: 1fr; } }
+label { display: block; font-size: 0.85rem; color: var(--muted); margin-bottom: 4px; }
+input[type="text"], input[type="number"], select { width: 100%; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 4px; color: var(--text); font-size: 0.9rem; }
+input:focus, select:focus { outline: none; border-color: var(--accent); }
+.field { margin-bottom: 12px; }
+.field.full { grid-column: 1 / -1; }
+.toggle { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.toggle input { width: 18px; height: 18px; accent-color: var(--accent); }
+.actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 16px; }
+button { padding: 8px 20px; border: none; border-radius: 4px; font-size: 0.9rem; cursor: pointer; font-weight: 500; }
+.btn-primary { background: var(--accent); color: #000; }
+.btn-primary:hover { opacity: 0.9; }
+.btn-success { background: var(--accent2); color: #000; }
+.btn-success:hover { opacity: 0.9; }
+.btn-danger { background: var(--danger); color: #fff; }
+.btn-danger:hover { opacity: 0.9; }
+.btn-outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+.btn-outline:hover { border-color: var(--accent); }
+.status { padding: 10px; border-radius: 4px; margin-top: 12px; font-size: 0.85rem; }
+.status-ok { background: #0d2818; color: var(--accent2); border: 1px solid #1a4a2a; }
+.status-warn { background: #2a1a00; color: var(--warn); border: 1px solid #4a3000; }
+.status-error { background: #2a0a0a; color: var(--danger); border: 1px solid #4a1a1a; }
+#output { background: #0a0a0a; border: 1px solid var(--border); border-radius: 4px; padding: 12px; margin-top: 12px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 0.8rem; white-space: pre-wrap; max-height: 500px; overflow-y: auto; display: none; color: #ccc; }
+.path-check { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.path-ok { background: var(--accent2); }
+.path-err { background: var(--danger); }
+.template-help { font-size: 0.75rem; color: var(--muted); margin-top: 4px; }
+.spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 6px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 10px; font-size: 0.75rem; font-weight: 500; }
+.badge-running { background: #1a3a1a; color: var(--accent2); }
+.badge-stopped { background: #2a1a1a; color: var(--muted); }
+.input-browse { display: flex; gap: 6px; }
+.input-browse input { flex: 1; }
+.btn-browse { padding: 8px 12px; background: var(--card); border: 1px solid var(--border); border-radius: 4px; color: var(--muted); cursor: pointer; font-size: 0.8rem; white-space: nowrap; }
+.btn-browse:hover { border-color: var(--accent); color: var(--text); }
+.modal { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.7); z-index: 100; display: flex; align-items: center; justify-content: center; }
+.modal-content { background: var(--card); border: 1px solid var(--border); border-radius: 8px; width: 90%; max-width: 500px; max-height: 70vh; display: flex; flex-direction: column; }
+.modal-header { display: flex; justify-content: space-between; align-items: center; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+.modal-header h2 { margin: 0; font-size: 1rem; }
+.modal-path { padding: 8px 16px; font-family: monospace; font-size: 0.8rem; color: var(--accent); background: var(--bg); }
+.modal-list { flex: 1; overflow-y: auto; padding: 8px 0; }
+.modal-list .dir-entry { padding: 8px 16px; cursor: pointer; font-size: 0.85rem; display: flex; align-items: center; gap: 8px; }
+.modal-list .dir-entry:hover { background: var(--bg); }
+.modal-footer { padding: 12px 16px; border-top: 1px solid var(--border); }
+</style>
+</head>
+<body>
+<div class="container">
+<h1><span>filebot</span> <span id="watchBadge" class="badge badge-stopped">stopped</span></h1>
+
+<div class="card">
+<h2>Paths</h2>
+<div class="grid">
+<div class="field">
+  <label>Source Directory</label>
+  <div class="input-browse"><input type="text" id="source" value=""><button class="btn-browse" onclick="openBrowser('source')">Browse</button></div>
+</div>
+<div class="field">
+  <label>Filter (optional)</label>
+  <input type="text" id="filter" value="" placeholder="e.g. Night Manager">
+</div>
+<div class="field">
+  <label>Movies Destination</label>
+  <div class="input-browse"><input type="text" id="movies_dest" value=""><button class="btn-browse" onclick="openBrowser('movies_dest')">Browse</button></div>
+</div>
+<div class="field">
+  <label>TV Destination</label>
+  <div class="input-browse"><input type="text" id="tv_dest" value=""><button class="btn-browse" onclick="openBrowser('tv_dest')">Browse</button></div>
+</div>
+</div>
+<div id="pathStatus"></div>
+</div>
+
+<div id="browserModal" class="modal" style="display:none">
+<div class="modal-content">
+<div class="modal-header"><h2>Browse Folders</h2><button class="btn-outline" onclick="closeBrowser()">Close</button></div>
+<div class="modal-path" id="browserPath">/</div>
+<div class="modal-list" id="browserList"></div>
+<div class="modal-footer"><button class="btn-primary" onclick="selectFolder()">Select This Folder</button></div>
+</div>
+</div>
+
+<div class="card">
+<h2>TMDB</h2>
+<div class="grid">
+<div class="field">
+  <label>API Key</label>
+  <input type="text" id="tmdb_api_key" value="" placeholder="TMDB v3 API key">
+</div>
+<div class="field">
+  <label>Read Token</label>
+  <input type="text" id="tmdb_read_token" value="" placeholder="TMDB v4 bearer token (alternative)">
+</div>
+</div>
+<label class="toggle"><input type="checkbox" id="use_tmdb" checked> Enable TMDB lookups</label>
+</div>
+
+<div class="card">
+<h2>Options</h2>
+<div class="grid">
+<div class="field">
+  <label class="toggle"><input type="checkbox" id="use_probe" checked> Bitrate probe (ffprobe)</label>
+</div>
+<div class="field">
+  <label class="toggle"><input type="checkbox" id="copy_mode"> Copy instead of move</label>
+</div>
+<div class="field">
+  <label class="toggle"><input type="checkbox" id="rename_mode"> Rename in-place (organize within source)</label>
+</div>
+<div class="field">
+  <label>Parallel Workers</label>
+  <input type="number" id="parallel" value="5" min="1" max="20">
+</div>
+<div class="field">
+  <label>Watch Interval (seconds, 0=off)</label>
+  <input type="number" id="watch_interval" value="0" min="0" max="86400">
+</div>
+</div>
+</div>
+
+<div class="card">
+<h2>File Format Templates</h2>
+<div class="field">
+  <label>Movie Format (leave blank for default)</label>
+  <input type="text" id="movie_format" value="" placeholder="{title} ({year}) {{tmdb-{tmdb_id}}}/{title} ({year}) - {quality}{ext}">
+  <div class="template-help">Variables: {title}, {year}, {tmdb_id}, {edition}, {quality}, {resolution}, {source}, {vcodec}, {acodec}, {bitrate_label}, {ext}</div>
+</div>
+<div class="field">
+  <label>TV Format (leave blank for default)</label>
+  <input type="text" id="tv_format" value="" placeholder="{show}/{season_folder}/{show} - S{season:02d}E{episode:02d} - {episode_title} - {quality}{ext}">
+  <div class="template-help">Variables: {show}, {season}, {episode}, {episode_title}, {season_folder}, {quality}, {resolution}, {ext}</div>
+</div>
+</div>
+
+<div class="actions">
+<button class="btn-primary" onclick="saveConfig()">Save Config</button>
+<button class="btn-outline" onclick="runDryRun()">Dry Run</button>
+<button class="btn-success" onclick="runExecute()">Execute</button>
+<button class="btn-outline" onclick="toggleWatch()" id="watchBtn">Start Watch</button>
+<button class="btn-outline" onclick="checkPaths()">Check Paths</button>
+</div>
+
+<div id="output"></div>
+</div>
+
+<script>
+const fields = ['source','movies_dest','tv_dest','tmdb_api_key','tmdb_read_token','use_tmdb','use_probe','copy_mode','rename_mode','parallel','watch_interval','movie_format','tv_format','filter'];
+
+async function loadConfig() {
+  const r = await fetch('/api/config');
+  const cfg = await r.json();
+  fields.forEach(f => {
+    const el = document.getElementById(f);
+    if (!el) return;
+    if (el.type === 'checkbox') el.checked = cfg[f] || false;
+    else el.value = cfg[f] || '';
+  });
+  updateWatchBadge(cfg._watch_active || false);
+}
+
+function getConfig() {
+  const cfg = {};
+  fields.forEach(f => {
+    const el = document.getElementById(f);
+    if (!el) return;
+    if (el.type === 'checkbox') cfg[f] = el.checked;
+    else if (el.type === 'number') cfg[f] = parseInt(el.value) || 0;
+    else cfg[f] = el.value;
+  });
+  return cfg;
+}
+
+async function saveConfig() {
+  const r = await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(getConfig())});
+  const res = await r.json();
+  showOutput(res.status === 'ok' ? 'Config saved.' : 'Error: ' + res.error, res.status === 'ok');
+}
+
+async function runDryRun() {
+  const out = document.getElementById('output');
+  out.style.display = 'block';
+  out.textContent = 'Running dry run...\\n';
+  const r = await fetch('/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({...getConfig(), execute: false})});
+  const res = await r.json();
+  out.textContent = res.output || res.error || 'Done';
+}
+
+async function runExecute() {
+  if (!confirm('This will actually move/copy files. Continue?')) return;
+  const out = document.getElementById('output');
+  out.style.display = 'block';
+  out.textContent = 'Executing...\\n';
+  const r = await fetch('/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({...getConfig(), execute: true})});
+  const res = await r.json();
+  out.textContent = res.output || res.error || 'Done';
+}
+
+async function toggleWatch() {
+  const r = await fetch('/api/watch', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(getConfig())});
+  const res = await r.json();
+  updateWatchBadge(res.active);
+  showOutput(res.message, true);
+}
+
+function updateWatchBadge(active) {
+  const badge = document.getElementById('watchBadge');
+  const btn = document.getElementById('watchBtn');
+  if (active) {
+    badge.textContent = 'watching';
+    badge.className = 'badge badge-running';
+    btn.textContent = 'Stop Watch';
+  } else {
+    badge.textContent = 'stopped';
+    badge.className = 'badge badge-stopped';
+    btn.textContent = 'Start Watch';
+  }
+}
+
+async function checkPaths() {
+  const r = await fetch('/api/check-paths', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(getConfig())});
+  const res = await r.json();
+  const div = document.getElementById('pathStatus');
+  let html = '';
+  res.paths.forEach(p => {
+    const cls = p.ok ? 'path-ok' : 'path-err';
+    html += '<div class="status ' + (p.ok ? 'status-ok' : 'status-error') + '"><span class="path-check ' + cls + '"></span>' + p.path + ': ' + p.status + '</div>';
+  });
+  div.innerHTML = html;
+}
+
+function showOutput(text, ok) {
+  const out = document.getElementById('output');
+  out.style.display = 'block';
+  out.textContent = text;
+}
+
+let browserTarget = null;
+let browserCurrentPath = '/';
+
+async function openBrowser(target) {
+  browserTarget = target;
+  const el = document.getElementById(target);
+  const startPath = el.value || '/';
+  document.getElementById('browserModal').style.display = 'flex';
+  await loadBrowserPath(startPath);
+}
+
+function closeBrowser() {
+  document.getElementById('browserModal').style.display = 'none';
+}
+
+async function loadBrowserPath(path) {
+  const r = await fetch('/api/browse?path=' + encodeURIComponent(path));
+  const data = await r.json();
+  browserCurrentPath = data.current;
+  document.getElementById('browserPath').textContent = data.current;
+  const list = document.getElementById('browserList');
+  list.innerHTML = '';
+  (data.entries || []).forEach(e => {
+    const div = document.createElement('div');
+    div.className = 'dir-entry';
+    div.textContent = (e.name === '..' ? '↑ ..' : '📁 ' + e.name);
+    div.onclick = () => loadBrowserPath(e.path);
+    list.appendChild(div);
+  });
+}
+
+function selectFolder() {
+  if (browserTarget) {
+    document.getElementById(browserTarget).value = browserCurrentPath;
+  }
+  closeBrowser();
+}
+
+loadConfig();
+</script>
+</body>
+</html>"""
+
+
+class WebHandler(http.server.BaseHTTPRequestHandler):
+    config = {}
+    _watch_thread = None
+    _watch_stop = threading.Event()
+
+    def log_message(self, format, *args):
+        log.debug(format % args)
+
+    def do_GET(self):
+        if self.path == "/" or self.path == "/index.html":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            self.wfile.write(WEB_HTML.encode())
+        elif self.path == "/api/config":
+            cfg = load_config()
+            cfg["_watch_active"] = WebHandler._watch_thread is not None and WebHandler._watch_thread.is_alive()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(cfg).encode())
+        elif self.path.startswith("/api/browse"):
+            # Browse directories on the server filesystem
+            query = urllib.parse.urlparse(self.path).query
+            params = urllib.parse.parse_qs(query)
+            path = params.get("path", ["/"])[0]
+            try:
+                if not os.path.isdir(path):
+                    path = os.path.dirname(path)
+                entries = []
+                entries.append({"name": "..", "path": os.path.dirname(os.path.abspath(path)), "is_dir": True})
+                for name in sorted(os.listdir(path)):
+                    if name.startswith("."):
+                        continue
+                    full = os.path.join(path, name)
+                    if os.path.isdir(full):
+                        entries.append({"name": name, "path": full, "is_dir": True})
+                self._json_response(200, {"current": os.path.abspath(path), "entries": entries})
+            except PermissionError:
+                self._json_response(403, {"error": f"Permission denied: {path}", "current": path, "entries": []})
+            except OSError as e:
+                self._json_response(500, {"error": str(e), "current": path, "entries": []})
+        else:
+            self.send_error(404)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length)
+        try:
+            data = json.loads(body) if body else {}
+        except json.JSONDecodeError:
+            self._json_response(400, {"error": "Invalid JSON"})
+            return
+
+        if self.path == "/api/config":
+            save_config(data)
+            self._json_response(200, {"status": "ok"})
+
+        elif self.path == "/api/run":
+            args_ns = _config_to_args(data)
+            # Capture stdout
+            old_stdout = sys.stdout
+            sys.stdout = buf = io.StringIO()
+            try:
+                run_once(args_ns)
+                output = buf.getvalue()
+            except Exception as e:
+                output = buf.getvalue() + f"\nError: {e}"
+            finally:
+                sys.stdout = old_stdout
+            self._json_response(200, {"output": output})
+
+        elif self.path == "/api/watch":
+            if WebHandler._watch_thread and WebHandler._watch_thread.is_alive():
+                # Stop watching
+                WebHandler._watch_stop.set()
+                WebHandler._watch_thread.join(timeout=5)
+                WebHandler._watch_thread = None
+                self._json_response(200, {"active": False, "message": "Watch stopped"})
+            else:
+                interval = data.get("watch_interval", 300) or 300
+                WebHandler._watch_stop.clear()
+                args_ns = _config_to_args(data)
+                args_ns.execute = True  # Watch mode should execute
+
+                def watch_loop():
+                    while not WebHandler._watch_stop.is_set():
+                        try:
+                            run_once(args_ns)
+                        except Exception as e:
+                            log.error(f"Watch error: {e}")
+                        WebHandler._watch_stop.wait(interval)
+
+                WebHandler._watch_thread = threading.Thread(target=watch_loop, daemon=True)
+                WebHandler._watch_thread.start()
+                self._json_response(200, {"active": True, "message": f"Watching every {interval}s"})
+
+        elif self.path == "/api/check-paths":
+            paths = []
+            for name, key in [("Source", "source"), ("Movies", "movies_dest"), ("TV", "tv_dest")]:
+                p = data.get(key, "")
+                if not p:
+                    paths.append({"path": name, "ok": False, "status": "not configured"})
+                elif not os.path.exists(p):
+                    paths.append({"path": f"{name}: {p}", "ok": False, "status": "does not exist"})
+                elif not os.access(p, os.R_OK):
+                    paths.append({"path": f"{name}: {p}", "ok": False, "status": "not readable"})
+                elif not os.access(p, os.W_OK) and key != "source":
+                    paths.append({"path": f"{name}: {p}", "ok": False, "status": "not writable"})
+                else:
+                    paths.append({"path": f"{name}: {p}", "ok": True, "status": "accessible"})
+            self._json_response(200, {"paths": paths})
+
+        else:
+            self.send_error(404)
+
+    def _json_response(self, code: int, data: dict):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode())
+
+
+def run_web_server(host: str, port: int):
+    """Start the web configuration server."""
+    server = http.server.HTTPServer((host, port), WebHandler)
+    log.info(f"Web UI: http://{host}:{port}")
+
+    def shutdown_handler(_signum, _frame):
+        log.info("Shutting down web server...")
+        threading.Thread(target=server.shutdown).start()
+
+    signal.signal(signal.SIGINT, shutdown_handler)
+    signal.signal(signal.SIGTERM, shutdown_handler)
+    server.serve_forever()
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="filebot",
+        description="Organize media files into Plex-friendly directory structures.",
+    )
+    parser.add_argument("source", nargs="?", default=None, help="Source directory containing disorganized media files")
+    parser.add_argument("--movies", "-m", default="/Volumes/Movies", help="Destination for movies (default: /Volumes/Movies)")
+    parser.add_argument("--tv", "-t", default="/Volumes/TV", help="Destination for TV shows (default: /Volumes/TV)")
+    parser.add_argument("--tmdb-key", "-k", default=None, help="TMDB API key (or set TMDB_API_KEY env var)")
+    parser.add_argument("--tmdb-token", default=None, help="TMDB read access token (or set TMDB_READ_TOKEN env var)")
+    parser.add_argument("--no-tmdb", action="store_true", help="Skip TMDB lookups, use filename parsing only")
+    parser.add_argument("--no-probe", action="store_true", help="Skip ffprobe bitrate detection (faster)")
+    parser.add_argument("--dry-run", "-n", action="store_true", default=True, help="Show what would happen without moving files (default)")
+    parser.add_argument("--execute", "-x", action="store_true", help="Actually move files (disables dry-run)")
+    parser.add_argument("--copy", "-c", action="store_true", help="Copy instead of move")
+    parser.add_argument("--rename", "-r", action="store_true", help="Rename files in-place (reorganize within source directory)")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed parsing info")
+    parser.add_argument("--filter", "-f", default=None, help="Only process entries matching this substring")
+    parser.add_argument("--parallel", "-j", type=int, default=5, help="Max parallel file operations (default: 5)")
+    parser.add_argument("--movie-format", default=None,
+                        help="Custom movie path template (variables: {title}, {year}, {tmdb_id}, {edition}, {quality}, {resolution}, {source}, {vcodec}, {acodec}, {bitrate_label}, {ext})")
+    parser.add_argument("--tv-format", default=None,
+                        help="Custom TV path template (variables: {show}, {season}, {episode}, {episode_title}, {season_folder}, {quality}, {ext})")
+    parser.add_argument("--watch", "-w", type=int, default=None, metavar="SECONDS",
+                        help="Watch mode: re-scan every N seconds (e.g. --watch 300 for 5 minutes)")
+    parser.add_argument("--web", action="store_true", help="Start web configuration UI")
+    parser.add_argument("--host", default="127.0.0.1", help="Web server host (default: 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8080, help="Web server port (default: 8080)")
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
+                        help="Logging level (default: INFO)")
+
+    args = parser.parse_args()
+
+    # Setup logging
+    use_timestamps = args.watch or args.web
+    logging.basicConfig(
+        level=getattr(logging, args.log_level),
+        format="%(asctime)s [%(levelname)s] %(message)s" if use_timestamps else "%(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # Web mode
+    if args.web:
+        # Load source from config if not provided on CLI
+        if not args.source:
+            cfg = load_config()
+            args.source = cfg.get("source", "/Volumes/Torrents")
+        run_web_server(args.host, args.port)
+        return
+
+    # CLI mode requires source
+    if not args.source:
+        parser.error("source directory is required (or use --web for web UI)")
+
+    dry_run = not args.execute
+    move = not args.copy
+    probe = not args.no_probe
+
+    # Print config header
+    tmdb_status = "disabled"
+    if not args.no_tmdb:
+        api_key = args.tmdb_key or os.environ.get("TMDB_API_KEY")
+        bearer_token = args.tmdb_token or os.environ.get("TMDB_READ_TOKEN")
+        if api_key or bearer_token:
+            tmdb_status = "enabled"
+        else:
+            tmdb_status = "disabled (set TMDB_API_KEY or use --tmdb-key)"
+    print(f"TMDB lookup: {tmdb_status}")
+
+    if dry_run:
+        print("Mode: DRY RUN (use -x to execute)")
+    elif args.rename:
+        print(f"Mode: RENAME IN-PLACE (parallel: {args.parallel})")
+    else:
+        action_word = "MOVE" if move else "COPY"
+        print(f"Mode: {action_word} (parallel: {args.parallel})")
+
+    if not probe:
+        print("Bitrate probe: disabled")
+
+    print(f"Source: {args.source}")
+    print(f"Movies -> {args.movies}")
+    print(f"TV     -> {args.tv}")
+    if args.watch:
+        print(f"Watch: every {args.watch}s")
+    print()
+
+    if args.watch:
+        # Watch mode: run continuously with graceful shutdown
+        running = True
+
+        def handle_signal(_signum, _frame):
+            nonlocal running
+            log.info("Shutting down...")
+            running = False
+
+        signal.signal(signal.SIGINT, handle_signal)
+        signal.signal(signal.SIGTERM, handle_signal)
+
+        while running:
+            try:
+                run_once(args)
+            except Exception as e:
+                log.error(f"Error during scan: {e}")
+
+            for _ in range(args.watch):
+                if not running:
+                    break
+                time.sleep(1)
+    else:
+        if not os.path.exists(args.source):
+            print(f"Error: source path does not exist: {args.source}", file=sys.stderr)
+            sys.exit(1)
+        run_once(args)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,16 @@
+services:
+  filebot:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - /Volumes/Torrents:/source
+      - /Volumes/Movies:/movies
+      - /Volumes/TV:/tv
+      - filebot-data:/root/.filebot
+    environment:
+      - TMDB_API_KEY=${TMDB_API_KEY}
+    restart: unless-stopped
+
+volumes:
+  filebot-data:
