@@ -242,8 +242,10 @@ def clean_title(raw: str) -> str:
     # Strip scene group suffixes like -SPARKS, -RARBG (only at end after cleanup)
     # Strip scene group suffixes: ALL CAPS (-SPARKS), all lowercase (-x0r),
     # or camelCase with multiple caps (-PublicHD, -FraMeSToR). Preserves
-    # title words like -Loss, -Team, -Stop, -Man which are single-cap.
-    name = re.sub(r"-(?:[A-Z]{2,15}|[a-z][a-z0-9]{1,14}|[A-Z][a-z]+[A-Z][A-Za-z]*)$", "", name)
+    # title words like -Loss, -Team, -Stop, -Man, -PAX which are single-cap.
+    # Require a word char (not just a single letter) before the hyphen to avoid
+    # stripping parts of titles like "K-PAX".
+    name = re.sub(r"(?<=\w{2})-(?:[A-Z]{2,15}|[a-z][a-z0-9]{1,14}|[A-Z][a-z]+[A-Z][A-Za-z]*)$", "", name)
     # Remove trailing hyphens/dashes
     name = re.sub(r"[\s-]+$", "", name)
 
