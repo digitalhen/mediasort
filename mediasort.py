@@ -1142,8 +1142,8 @@ def cleanup_source_dir(source_dir: str, moved_files: set[str], dry_run: bool = F
                 if fp in moved_files:
                     continue  # Already moved
                 ext = os.path.splitext(f)[1].lower()
-                if ext in CLEANUP_KEEP_EXTENSIONS:
-                    continue  # Don't delete remaining video/subtitle files
+                if ext in CLEANUP_KEEP_EXTENSIONS and not is_junk_file(f):
+                    continue  # Don't delete remaining video/subtitle files (unless junk)
                 if dry_run:
                     cleaned.append(f"  \033[31m[DELETE]\033[0m {fp}")
                 else:
@@ -1163,7 +1163,8 @@ def cleanup_source_dir(source_dir: str, moved_files: set[str], dry_run: bool = F
             else:
                 try:
                     remaining = [f for f in os.listdir(root)
-                                 if os.path.splitext(f)[1].lower() in CLEANUP_KEEP_EXTENSIONS
+                                 if (os.path.splitext(f)[1].lower() in CLEANUP_KEEP_EXTENSIONS
+                                     and not is_junk_file(f))
                                  or os.path.isdir(os.path.join(root, f))]
                     if not remaining:
                         cleaned.append(f"  \033[31m[RMDIR]\033[0m {root}")
