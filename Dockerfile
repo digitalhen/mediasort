@@ -11,4 +11,4 @@ ENV TMDB_API_KEY=""
 ENV TMDB_READ_TOKEN=""
 
 ENTRYPOINT ["python3", "mediasort.py"]
-CMD ["/source", "--movies", "/movies", "--tv", "/tv", "-x"]
+CMD ["/source", "--movies", "/movies", "--tv", "/tv", "-x", "--watch", "300", "--cleanup"]

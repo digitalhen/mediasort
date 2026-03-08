@@ -1,13 +1,14 @@
 services:
   mediasort:
     build: .
+    container_name: mediasort
     volumes:
       - /Volumes/Torrents:/source
       - /Volumes/Movies:/movies
       - /Volumes/TV:/tv
       - mediasort-data:/root/.mediasort
     environment:
-      - TMDB_API_KEY=${TMDB_API_KEY}
+      - TMDB_API_KEY=42e41ebc90757c9dd6d5992a14e5d474
     restart: unless-stopped
 
 volumes:
