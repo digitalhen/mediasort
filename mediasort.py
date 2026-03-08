@@ -660,7 +660,9 @@ def find_video_files(path: str) -> list[str]:
     """Recursively find all video files under a path."""
     videos = []
     if os.path.isfile(path):
-        if os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS and not is_downloading(path):
+        if (os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS
+                and not is_junk_file(os.path.basename(path))
+                and not is_downloading(path)):
             videos.append(path)
         return videos
 
@@ -1103,6 +1105,74 @@ def _execute_action(action: dict, move: bool) -> dict:
     return action
 
 
+# Files to always keep during cleanup (safety)
+CLEANUP_KEEP_EXTENSIONS = VIDEO_EXTENSIONS | SUBTITLE_EXTENSIONS
+
+# Known junk file extensions to delete during cleanup
+CLEANUP_JUNK_EXTENSIONS = {
+    ".nfo", ".txt", ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".url",
+    ".exe", ".html", ".htm", ".torrent", ".sfv", ".nzb", ".srr",
+}
+
+
+def cleanup_source_dir(source_dir: str, moved_files: set[str], dry_run: bool = False) -> list[str]:
+    """Clean up leftover junk files and empty directories after moving videos out.
+
+    Only cleans subdirectories of source_dir where files were successfully moved.
+    Returns list of cleaned paths.
+    """
+    cleaned = []
+    # Find which top-level subdirectories had files moved
+    affected_dirs = set()
+    for f in moved_files:
+        parent = os.path.dirname(f)
+        # Get the top-level subdir relative to source
+        rel = os.path.relpath(f, source_dir)
+        parts = rel.split(os.sep)
+        if len(parts) > 1:
+            top_path = os.path.join(source_dir, parts[0])
+            if os.path.isdir(top_path):
+                affected_dirs.add(top_path)
+
+    for d in sorted(affected_dirs):
+        # Walk bottom-up to delete files then empty dirs
+        for root, dirs, files in os.walk(d, topdown=False):
+            for f in files:
+                fp = os.path.join(root, f)
+                if fp in moved_files:
+                    continue  # Already moved
+                ext = os.path.splitext(f)[1].lower()
+                if ext in CLEANUP_KEEP_EXTENSIONS:
+                    continue  # Don't delete remaining video/subtitle files
+                if dry_run:
+                    cleaned.append(f"  \033[31m[DELETE]\033[0m {fp}")
+                else:
+                    try:
+                        os.remove(fp)
+                        cleaned.append(fp)
+                    except OSError:
+                        pass
+            # Remove empty directories
+            if not dry_run:
+                try:
+                    if not os.listdir(root):
+                        os.rmdir(root)
+                        cleaned.append(root)
+                except OSError:
+                    pass
+            else:
+                try:
+                    remaining = [f for f in os.listdir(root)
+                                 if os.path.splitext(f)[1].lower() in CLEANUP_KEEP_EXTENSIONS
+                                 or os.path.isdir(os.path.join(root, f))]
+                    if not remaining:
+                        cleaned.append(f"  \033[31m[RMDIR]\033[0m {root}")
+                except OSError:
+                    pass
+
+    return cleaned
+
+
 def check_paths_accessible(*paths: str) -> list[str]:
     """Check that all paths exist and are accessible. Returns list of errors."""
     errors = []
@@ -1179,9 +1249,19 @@ def run_once(args) -> int:
 
     total = len(all_actions)
 
+    cleanup = getattr(args, "cleanup", False)
+
     if dry_run:
         for r in all_actions:
             print_result(r, args.verbose)
+        if cleanup:
+            moved = {r["source"] for r in all_actions if r.get("dest")}
+            cleaned = cleanup_source_dir(args.source, moved, dry_run=True)
+            if cleaned:
+                print()
+                print("Cleanup preview:")
+                for line in cleaned:
+                    print(line)
         print()
         print(f"Total: {total} files")
         if total:
@@ -1221,6 +1301,14 @@ def run_once(args) -> int:
             concurrent.futures.wait(futures)
 
         skipped = total - len(actionable)
+
+        # Cleanup after successful moves
+        if cleanup and stats.get("done", 0) > 0:
+            moved = {a["source"] for a in actionable if a["status"] == "done"}
+            cleaned = cleanup_source_dir(args.source, moved, dry_run=False)
+            if cleaned:
+                print(f"  cleaned: {len(cleaned)} files/dirs")
+
         print()
         print(f"Total: {total} files")
         if total:
@@ -1256,6 +1344,7 @@ def load_config() -> dict:
         "execute": False,
         "copy_mode": False,
         "rename_mode": False,
+        "cleanup": False,
         "parallel": 5,
         "movie_format": "",
         "tv_format": "",
@@ -1292,6 +1381,7 @@ def _config_to_args(cfg: dict):
     ns.execute = cfg.get("execute", False)
     ns.copy = cfg.get("copy_mode", False)
     ns.rename = cfg.get("rename_mode", False)
+    ns.cleanup = cfg.get("cleanup", False)
     ns.verbose = False
     ns.filter = cfg.get("filter") or None
     ns.parallel = cfg.get("parallel", 5)
@@ -1756,6 +1846,7 @@ def main():
     parser.add_argument("--execute", "-x", action="store_true", help="Actually move files (disables dry-run)")
     parser.add_argument("--copy", "-c", action="store_true", help="Copy instead of move")
     parser.add_argument("--rename", "-r", action="store_true", help="Rename files in-place (reorganize within source directory)")
+    parser.add_argument("--cleanup", action="store_true", help="Delete leftover junk files (NFOs, samples, txt) and empty dirs after moving")
     parser.add_argument("--verbose", "-v", action="store_true", help="Show detailed parsing info")
     parser.add_argument("--filter", "-f", default=None, help="Only process entries matching this substring")
     parser.add_argument("--parallel", "-j", type=int, default=5, help="Max parallel file operations (default: 5)")
