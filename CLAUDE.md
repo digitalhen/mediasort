@@ -1,6 +1,6 @@
 # mediasort
 
-A CLI tool + web UI to organize media files into Plex-friendly directory structures.
+A CLI tool to organize media files into Plex-friendly directory structures.
 
 ## What it does
 
@@ -18,9 +18,8 @@ Single-file Python CLI (`mediasort.py`) with zero dependencies (stdlib only + op
 - **TMDB client** — looks up canonical titles and episode names. Persistent 7-day disk cache in `~/.mediasort/cache/`
 - **Plex formatter** — generates proper directory structures with `{tmdb-ID}` and `{edition-...}` tags
 - **Format templates** — configurable output path patterns via `--movie-format` / `--tv-format`
-- **Web UI** — built-in HTTP server for browser-based configuration with server-side folder browsing
 - **Watch mode** — continuous scanning at configurable intervals with graceful SIGTERM/SIGINT shutdown
-- **Docker support** — Dockerfile + docker-compose.yml included, web UI binds to `0.0.0.0:8080`
+- **Docker support** — Dockerfile + docker-compose.yml included
 
 ## Usage
 
@@ -33,9 +32,6 @@ TMDB_API_KEY=your_key python3 mediasort.py /Volumes/Torrents
 
 # Actually move files
 python3 mediasort.py /Volumes/Torrents -x
-
-# Web UI
-python3 mediasort.py --web
 
 # Watch mode (re-scan every 5 min)
 python3 mediasort.py /Volumes/Torrents -x --watch 300
@@ -57,7 +53,7 @@ python3 mediasort.py /Volumes/Torrents -x --rename
 
 ## Config persistence
 
-- Config stored in `~/.mediasort/config.json` (used by web UI)
+- Config stored in `~/.mediasort/config.json` (TMDB keys, defaults)
 - TMDB cache stored in `~/.mediasort/cache/`
 
 ## Development workflow
@@ -71,4 +67,4 @@ python3 mediasort.py /Volumes/Torrents -x --rename
 - Non-video files (music, books, games, ISOs) are silently skipped
 - Multi-episode files (S01E01E02) not fully handled
 - No undo/rollback mechanism
-- No leftover cleanup flag yet (trailers, NFOs, etc. left in source)
+- Cleanup flag (`--cleanup`) handles junk files but could be more thorough

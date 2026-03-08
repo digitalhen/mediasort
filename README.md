@@ -1,6 +1,6 @@
 # mediasort
 
-A zero-dependency Python CLI tool to organize media files into Plex-friendly directory structures, with optional web UI for configuration.
+A zero-dependency Python CLI tool to organize media files into Plex-friendly directory structures.
 
 ## Features
 
@@ -11,7 +11,6 @@ A zero-dependency Python CLI tool to organize media files into Plex-friendly dir
 - **Subtitle organization** — discovers and organizes existing subtitle files alongside videos
 - **Download detection** — skips files still being downloaded (`.part`, `.!qb`, `.aria2`, etc.)
 - **Watch mode** — continuous monitoring with configurable scan interval
-- **Web UI** — browser-based configuration with server-side folder browsing
 - **Docker support** — run as a container with volume mounts
 - **Parallel execution** — threaded file operations with progress bar
 - **Persistent TMDB cache** — 7-day disk cache to avoid redundant API calls
@@ -43,25 +42,6 @@ python3 mediasort.py /Volumes/Torrents -f "Night Manager"
 python3 mediasort.py /Volumes/Torrents --movies /path/to/movies --tv /path/to/tv
 ```
 
-## Web UI
-
-```bash
-# Start web configuration interface
-python3 mediasort.py --web
-
-# Accessible at http://localhost:8080
-# Custom host/port
-python3 mediasort.py --web --host 0.0.0.0 --port 9090
-```
-
-The web UI provides:
-- Path configuration with server-side folder browsing
-- TMDB API key management
-- Format template editing
-- Dry run and execute controls
-- Watch mode toggle
-- Path accessibility checking
-
 ## Watch Mode
 
 ```bash
@@ -77,16 +57,7 @@ python3 mediasort.py /Volumes/Torrents -x --watch 300
 # Build
 docker build -t mediasort .
 
-# Run with web UI (recommended)
-docker run -d \
-  -p 8080:8080 \
-  -v /path/to/downloads:/source \
-  -v /path/to/movies:/movies \
-  -v /path/to/tv:/tv \
-  -e TMDB_API_KEY=your_key \
-  mediasort
-
-# Run CLI mode
+# Run
 docker run --rm \
   -v /path/to/downloads:/source \
   -v /path/to/movies:/movies \
@@ -102,8 +73,6 @@ docker run --rm \
 services:
   mediasort:
     build: .
-    ports:
-      - "8080:8080"
     volumes:
       - /Volumes/Torrents:/source
       - /Volumes/Movies:/movies
@@ -169,7 +138,7 @@ python3 mediasort.py /source -x --tv-format "{show}/{season_folder} [{resolution
 
 | Option | Description |
 |--------|-------------|
-| `source` | Source directory (required for CLI, optional with `--web`) |
+| `source` | Source directory (required) |
 | `-m, --movies` | Movies destination (default: `/Volumes/Movies`) |
 | `-t, --tv` | TV destination (default: `/Volumes/TV`) |
 | `-k, --tmdb-key` | TMDB API key |
@@ -185,9 +154,6 @@ python3 mediasort.py /source -x --tv-format "{show}/{season_folder} [{resolution
 | `--movie-format` | Custom movie path template |
 | `--tv-format` | Custom TV path template |
 | `-w, --watch` | Watch mode: re-scan every N seconds |
-| `--web` | Start web configuration UI |
-| `--host` | Web server host (default: `127.0.0.1`) |
-| `--port` | Web server port (default: `8080`) |
 | `--log-level` | Logging level: DEBUG/INFO/WARNING/ERROR |
 
 ## Environment Variables
@@ -208,7 +174,7 @@ python3 mediasort.py /source -x --tv-format "{show}/{season_folder} [{resolution
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.8+
 - No pip dependencies (stdlib only)
 - Optional: `ffprobe` (for bitrate detection)
 - Optional: TMDB API key (for metadata lookup)
