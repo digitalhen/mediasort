@@ -25,7 +25,6 @@ import urllib.parse
 import urllib.request
 
 TMDB_BASE = "https://api.themoviedb.org/3"
-OPENSUBTITLES_BASE = "https://api.opensubtitles.com/api/v1"
 
 VIDEO_EXTENSIONS = {
     ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm",
@@ -482,6 +481,81 @@ def bitrate_label(bitrate: int | None) -> str | None:
         return "Ultra"
 
 
+def find_subtitle_files(video_path: str) -> list[dict]:
+    """Find subtitle files associated with a video file.
+
+    Looks in the same directory and common sub-directories (Subs, Subtitles).
+    Returns list of dicts with 'path' and 'lang' keys.
+    """
+    video_dir = os.path.dirname(video_path)
+    video_base = os.path.splitext(os.path.basename(video_path))[0].lower()
+    subs = []
+
+    # Directories to search
+    search_dirs = [video_dir]
+    for sub_dir in ("Subs", "Subtitles", "Sub", "subs", "subtitles"):
+        d = os.path.join(video_dir, sub_dir)
+        if os.path.isdir(d):
+            search_dirs.append(d)
+
+    for d in search_dirs:
+        if not os.path.isdir(d):
+            continue
+        for f in os.listdir(d):
+            ext = os.path.splitext(f)[1].lower()
+            if ext not in SUBTITLE_EXTENSIONS:
+                continue
+            fname_lower = f.lower()
+            # Try to detect language from filename
+            lang = _detect_sub_language(f)
+            # Match: same base name, or generic language name (e.g., "English.srt")
+            if (video_base in os.path.splitext(fname_lower)[0]
+                    or fname_lower.startswith(("english", "eng.", "eng_"))
+                    or lang):
+                subs.append({
+                    "path": os.path.join(d, f),
+                    "lang": lang or "en",
+                    "ext": ext,
+                })
+
+    return subs
+
+
+# Common language patterns in subtitle filenames
+_LANG_PATTERNS = {
+    "english": "en", "eng": "en", "en": "en",
+    "english_hi": "en_hi", "eng_hi": "en_hi", "sdh": "en_hi",
+    "spanish": "es", "spa": "es", "es": "es",
+    "french": "fr", "fre": "fr", "fra": "fr", "fr": "fr",
+    "german": "de", "ger": "de", "deu": "de", "de": "de",
+    "dutch": "nl", "dut": "nl", "nld": "nl", "nl": "nl",
+    "italian": "it", "ita": "it", "it": "it",
+    "portuguese": "pt", "por": "pt", "pt": "pt",
+    "swedish": "sv", "swe": "sv", "sv": "sv",
+    "chinese": "zh", "chi": "zh", "zh": "zh",
+    "japanese": "ja", "jpn": "ja", "ja": "ja",
+    "korean": "ko", "kor": "ko", "ko": "ko",
+    "arabic": "ar", "ara": "ar", "ar": "ar",
+}
+
+
+def _detect_sub_language(filename: str) -> str | None:
+    """Detect subtitle language from filename patterns."""
+    base = os.path.splitext(filename)[0].lower()
+    # Check for language suffix like "movie_eng.srt" or "English.srt"
+    parts = re.split(r"[._\-\s]", base)
+    for part in reversed(parts):
+        if part in _LANG_PATTERNS:
+            return _LANG_PATTERNS[part]
+    return None
+
+
+def format_subtitle_name(video_dest_path: str, lang: str, sub_ext: str) -> str:
+    """Generate Plex-compatible subtitle filename next to the video."""
+    video_base = os.path.splitext(video_dest_path)[0]
+    return f"{video_base}.{lang}{sub_ext}"
+
+
 def is_junk_file(filename: str) -> bool:
     """Check if a file is junk/promo/sample that should be skipped."""
     basename = os.path.splitext(filename)[0].lower().strip()
@@ -748,6 +822,15 @@ def process_file(
         action["error"] = "Could not determine media type"
         return action
 
+    # Find associated subtitle files
+    if action["dest"]:
+        subs = find_subtitle_files(filepath)
+        sub_actions = []
+        for sub in subs:
+            sub_dest = format_subtitle_name(action["dest"], sub["lang"], sub["ext"])
+            sub_actions.append({"source": sub["path"], "dest": sub_dest, "lang": sub["lang"]})
+        action["subtitles"] = sub_actions
+
     # Execute the move/copy
     if not dry_run and action["dest"]:
         dest_dir = os.path.dirname(action["dest"])
@@ -760,6 +843,13 @@ def process_file(
             else:
                 shutil.copy2(filepath, action["dest"])
             action["status"] = "done"
+            # Also move/copy subtitles
+            for sa in action.get("subtitles", []):
+                if not os.path.exists(sa["dest"]):
+                    if move:
+                        shutil.move(sa["source"], sa["dest"])
+                    else:
+                        shutil.copy2(sa["source"], sa["dest"])
     elif action["dest"]:
         action["status"] = "dry_run"
 
@@ -824,6 +914,8 @@ def print_result(r: dict, verbose: bool = False):
         if r.get("matched"):
             print(f"          matched: {r['matched']}")
         print(f"          -> {dest_display}")
+        for sa in r.get("subtitles", []):
+            print(f"          sub [{sa['lang']}] -> {os.path.basename(sa['dest'])}")
     else:
         error = r.get("error", "")
         print(f"  {color}[{status}]{reset} {src_display} ({error})")
