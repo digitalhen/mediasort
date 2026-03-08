@@ -531,12 +531,29 @@ def bitrate_label(bitrate: int | None) -> str | None:
         return "Ultra"
 
 
+def _file_fingerprint(path: str) -> tuple[int, bytes]:
+    """Return (size, partial_hash) for a file.
+
+    Hashes the first and last 1MB for a fast integrity check.
+    """
+    CHUNK = 1024 * 1024  # 1MB
+    size = os.path.getsize(path)
+    h = hashlib.md5()
+    with open(path, "rb") as f:
+        h.update(f.read(CHUNK))
+        if size > CHUNK * 2:
+            f.seek(-CHUNK, 2)
+            h.update(f.read(CHUNK))
+    return size, h.digest()
+
+
 def _safe_transfer(src: str, dest: str, move: bool = True):
     """Transfer a file using a .copying suffix to mark in-progress transfers.
 
-    Copies to dest.copying first, then renames to final name. If move=True,
-    deletes the source after successful transfer. This ensures incomplete
-    transfers are obvious and won't confuse media servers.
+    Copies to dest.copying first, verifies size + partial hash match,
+    then renames to final name. If move=True, deletes the source after
+    successful verification. This ensures incomplete or corrupt transfers
+    are caught before removing the original.
     """
     tmp_dest = dest + ".copying"
     try:
@@ -547,7 +564,14 @@ def _safe_transfer(src: str, dest: str, move: bool = True):
                 return
             except OSError:
                 pass  # Cross-device; fall through to copy+delete
+        src_fp = _file_fingerprint(src)
         shutil.copy2(src, tmp_dest)
+        dest_fp = _file_fingerprint(tmp_dest)
+        if src_fp != dest_fp:
+            raise IOError(
+                f"Integrity check failed for {os.path.basename(src)}: "
+                f"src={src_fp[0]} bytes, dest={dest_fp[0]} bytes"
+            )
         os.rename(tmp_dest, dest)
         if move:
             os.remove(src)
