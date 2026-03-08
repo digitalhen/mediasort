@@ -963,6 +963,13 @@ def process_file(
         action["error"] = "Could not parse title"
         return action
 
+    # Reject titles that are just a number/year — these are bare filenames
+    # like "1941.avi" that would get false TMDB matches
+    if re.match(r"^\d{1,4}$", parsed["title"].strip()):
+        action["status"] = "skipped"
+        action["error"] = f"Title is just a number: {parsed['title']}"
+        return action
+
     if parsed["type"] == "tv":
         # Look up TV show
         show_title = parsed["title"]
