@@ -1,6 +1,6 @@
-# filebot
+# mediasort
 
-A custom CLI tool to organize media files into Plex-friendly directory structures, inspired by the original FileBot.
+A CLI tool + web UI to organize media files into Plex-friendly directory structures.
 
 ## What it does
 
@@ -11,34 +11,37 @@ Scans a source directory (e.g. `/Volumes/Torrents`) for video files, identifies 
 
 ## Architecture
 
-Single-file Python CLI (`filebot.py`) with zero dependencies (stdlib only + optional ffprobe). Key components:
+Single-file Python CLI (`mediasort.py`) with zero dependencies (stdlib only + optional ffprobe). Key components:
 
 - **Filename parser** — regex-based extraction of title, year, season, episode, edition, resolution, source, codecs
 - **Parent directory inference** — climbs up to 3 directory levels to find titles when filenames are bare
-- **TMDB client** — looks up canonical titles and episode names. Persistent 7-day disk cache in `~/.filebot/cache/`
+- **TMDB client** — looks up canonical titles and episode names. Persistent 7-day disk cache in `~/.mediasort/cache/`
 - **Plex formatter** — generates proper directory structures with `{tmdb-ID}` and `{edition-...}` tags
 - **Format templates** — configurable output path patterns via `--movie-format` / `--tv-format`
-- **Web UI** — built-in HTTP server for browser-based configuration with folder browsing
+- **Web UI** — built-in HTTP server for browser-based configuration with server-side folder browsing
 - **Watch mode** — continuous scanning at configurable intervals with graceful SIGTERM/SIGINT shutdown
-- **Docker support** — Dockerfile included, web UI binds to `0.0.0.0:8080`
+- **Docker support** — Dockerfile + docker-compose.yml included, web UI binds to `0.0.0.0:8080`
 
 ## Usage
 
 ```bash
 # Dry run (default)
-python3 filebot.py /Volumes/Torrents
+python3 mediasort.py /Volumes/Torrents
 
 # With TMDB
-TMDB_API_KEY=your_key python3 filebot.py /Volumes/Torrents
+TMDB_API_KEY=your_key python3 mediasort.py /Volumes/Torrents
 
 # Actually move files
-python3 filebot.py /Volumes/Torrents -x
+python3 mediasort.py /Volumes/Torrents -x
 
 # Web UI
-python3 filebot.py --web
+python3 mediasort.py --web
 
 # Watch mode (re-scan every 5 min)
-python3 filebot.py /Volumes/Torrents -x --watch 300
+python3 mediasort.py /Volumes/Torrents -x --watch 300
+
+# Rename in-place
+python3 mediasort.py /Volumes/Torrents -x --rename
 ```
 
 ## Environment variables
@@ -54,13 +57,13 @@ python3 filebot.py /Volumes/Torrents -x --watch 300
 
 ## Config persistence
 
-- Config stored in `~/.filebot/config.json` (used by web UI)
-- TMDB cache stored in `~/.filebot/cache/`
+- Config stored in `~/.mediasort/config.json` (used by web UI)
+- TMDB cache stored in `~/.mediasort/cache/`
 
 ## Development workflow
 
 - **Auto-commit and push** changes to git as work progresses (standing instruction from user)
-- Git remote: `https://github.com/digitalhen/filebot.git`, branch `main`
+- Git remote: `https://github.com/digitalhen/mediasort.git`, branch `main`
 - Keep README.md and CLAUDE.md up to date when making changes
 
 ## Known limitations / TODO

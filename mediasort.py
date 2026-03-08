@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-filebot - A CLI tool to organize media files into Plex-friendly directory structures.
+mediasort - A CLI tool to organize media files into Plex-friendly directory structures.
 
 Uses TMDB API for metadata lookup. Moves TV shows and movies into separate
 directories with proper naming conventions.
@@ -37,9 +37,9 @@ DEFAULT_TV_FORMAT = "{show}/{season_folder}/{show} - S{season:02d}E{episode:02d}
 DEFAULT_TV_FORMAT_NO_EPISODE_TITLE = "{show}/{season_folder}/{show} - S{season:02d}E{episode:02d} - {quality}{ext}"
 
 # Persistent TMDB disk cache directory
-CACHE_DIR = os.path.join(os.path.expanduser("~"), ".filebot", "cache")
+CACHE_DIR = os.path.join(os.path.expanduser("~"), ".mediasort", "cache")
 
-log = logging.getLogger("filebot")
+log = logging.getLogger("mediasort")
 
 VIDEO_EXTENSIONS = {
     ".mkv", ".mp4", ".avi", ".mov", ".wmv", ".flv", ".webm",
@@ -1241,7 +1241,7 @@ def run_once(args) -> int:
 import http.server
 import io
 
-CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".filebot", "config.json")
+CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".mediasort", "config.json")
 
 def load_config() -> dict:
     """Load persistent config from disk."""
@@ -1307,7 +1307,7 @@ WEB_HTML = """<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>filebot</title>
+<title>mediasort</title>
 <style>
 :root { --bg: #0f0f0f; --card: #1a1a1a; --border: #2a2a2a; --text: #e0e0e0; --muted: #888; --accent: #4a9eff; --accent2: #34d399; --danger: #ef4444; --warn: #f59e0b; }
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -1367,7 +1367,7 @@ button { padding: 8px 20px; border: none; border-radius: 4px; font-size: 0.9rem;
 </head>
 <body>
 <div class="container">
-<h1><span>filebot</span> <span id="watchBadge" class="badge badge-stopped">stopped</span></h1>
+<h1><span>mediasort</span> <span id="watchBadge" class="badge badge-stopped">stopped</span></h1>
 
 <div class="card">
 <h2>Paths</h2>
@@ -1742,7 +1742,7 @@ def run_web_server(host: str, port: int):
 
 def main():
     parser = argparse.ArgumentParser(
-        prog="filebot",
+        prog="mediasort",
         description="Organize media files into Plex-friendly directory structures.",
     )
     parser.add_argument("source", nargs="?", default=None, help="Source directory containing disorganized media files")

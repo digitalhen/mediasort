@@ -1,6 +1,6 @@
-# filebot
+# mediasort
 
-A zero-dependency Python CLI tool to organize media files into Plex-friendly directory structures, with optional web UI for configuration. Inspired by the original FileBot.
+A zero-dependency Python CLI tool to organize media files into Plex-friendly directory structures, with optional web UI for configuration.
 
 ## Features
 
@@ -16,38 +16,42 @@ A zero-dependency Python CLI tool to organize media files into Plex-friendly dir
 - **Parallel execution** — threaded file operations with progress bar
 - **Persistent TMDB cache** — 7-day disk cache to avoid redundant API calls
 - **Configurable format templates** — customize output path patterns
+- **Rename in-place** — reorganize files within the source directory
 
 ## Quick Start
 
 ```bash
 # Dry run (default - shows what would happen)
-python3 filebot.py /Volumes/Torrents
+python3 mediasort.py /Volumes/Torrents
 
 # With TMDB for proper titles and episode names
-TMDB_API_KEY=your_key python3 filebot.py /Volumes/Torrents
+TMDB_API_KEY=your_key python3 mediasort.py /Volumes/Torrents
 
 # Actually move files
-python3 filebot.py /Volumes/Torrents -x
+python3 mediasort.py /Volumes/Torrents -x
 
 # Copy instead of move
-python3 filebot.py /Volumes/Torrents -x -c
+python3 mediasort.py /Volumes/Torrents -x -c
+
+# Rename in-place (reorganize within source)
+python3 mediasort.py /Volumes/Torrents -x --rename
 
 # Filter to specific files
-python3 filebot.py /Volumes/Torrents -f "Night Manager"
+python3 mediasort.py /Volumes/Torrents -f "Night Manager"
 
 # Custom destinations
-python3 filebot.py /Volumes/Torrents --movies /path/to/movies --tv /path/to/tv
+python3 mediasort.py /Volumes/Torrents --movies /path/to/movies --tv /path/to/tv
 ```
 
 ## Web UI
 
 ```bash
 # Start web configuration interface
-python3 filebot.py --web
+python3 mediasort.py --web
 
 # Accessible at http://localhost:8080
 # Custom host/port
-python3 filebot.py --web --host 0.0.0.0 --port 9090
+python3 mediasort.py --web --host 0.0.0.0 --port 9090
 ```
 
 The web UI provides:
@@ -62,7 +66,7 @@ The web UI provides:
 
 ```bash
 # Re-scan every 5 minutes
-python3 filebot.py /Volumes/Torrents -x --watch 300
+python3 mediasort.py /Volumes/Torrents -x --watch 300
 
 # Responds to SIGINT/SIGTERM for graceful shutdown
 ```
@@ -71,7 +75,7 @@ python3 filebot.py /Volumes/Torrents -x --watch 300
 
 ```bash
 # Build
-docker build -t filebot .
+docker build -t mediasort .
 
 # Run with web UI (recommended)
 docker run -d \
@@ -80,7 +84,7 @@ docker run -d \
   -v /path/to/movies:/movies \
   -v /path/to/tv:/tv \
   -e TMDB_API_KEY=your_key \
-  filebot
+  mediasort
 
 # Run CLI mode
 docker run --rm \
@@ -88,7 +92,7 @@ docker run --rm \
   -v /path/to/movies:/movies \
   -v /path/to/tv:/tv \
   -e TMDB_API_KEY=your_key \
-  filebot /source -x --movies /movies --tv /tv
+  mediasort /source -x --movies /movies --tv /tv
 
 # Docker Compose
 ```
@@ -96,7 +100,7 @@ docker run --rm \
 ```yaml
 # docker-compose.yml
 services:
-  filebot:
+  mediasort:
     build: .
     ports:
       - "8080:8080"
@@ -113,7 +117,7 @@ services:
 
 ```bash
 # Run every 30 minutes
-*/30 * * * * TMDB_API_KEY=your_key python3 /path/to/filebot.py /Volumes/Torrents -x --movies /Volumes/Movies --tv /Volumes/TV >> /var/log/filebot.log 2>&1
+*/30 * * * * TMDB_API_KEY=your_key python3 /path/to/mediasort.py /Volumes/Torrents -x --movies /Volumes/Movies --tv /Volumes/TV >> /var/log/mediasort.log 2>&1
 ```
 
 ## Output Format
@@ -134,10 +138,10 @@ Use `--movie-format` and `--tv-format` to customize output paths:
 
 ```bash
 # Simple movie format without TMDB ID
-python3 filebot.py /source -x --movie-format "{title} ({year})/{title} ({year}) - {quality}{ext}"
+python3 mediasort.py /source -x --movie-format "{title} ({year})/{title} ({year}) - {quality}{ext}"
 
 # TV with resolution in folder
-python3 filebot.py /source -x --tv-format "{show}/{season_folder} [{resolution}]/{show} - S{season:02d}E{episode:02d}{ext}"
+python3 mediasort.py /source -x --tv-format "{show}/{season_folder} [{resolution}]/{show} - S{season:02d}E{episode:02d}{ext}"
 ```
 
 ### Available Variables
@@ -174,6 +178,7 @@ python3 filebot.py /source -x --tv-format "{show}/{season_folder} [{resolution}]
 | `--no-probe` | Skip ffprobe bitrate detection |
 | `-x, --execute` | Actually move files (default is dry run) |
 | `-c, --copy` | Copy instead of move |
+| `-r, --rename` | Rename in-place (organize within source) |
 | `-v, --verbose` | Show detailed parsing info |
 | `-f, --filter` | Only process entries matching substring |
 | `-j, --parallel` | Max parallel workers (default: 5) |

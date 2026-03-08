@@ -1,5 +1,5 @@
 services:
-  filebot:
+  mediasort:
     build: .
     ports:
       - "8080:8080"
@@ -7,10 +7,10 @@ services:
       - /Volumes/Torrents:/source
       - /Volumes/Movies:/movies
       - /Volumes/TV:/tv
-      - filebot-data:/root/.filebot
+      - mediasort-data:/root/.mediasort
     environment:
       - TMDB_API_KEY=${TMDB_API_KEY}
     restart: unless-stopped
 
 volumes:
-  filebot-data:
+  mediasort-data:
