@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3 -c \"import requests\" 2>&1; python3 -c \"import guessit\" 2>&1)",
+      "Bash(python3 -c \"import urllib.request; print\\('stdlib urllib works'\\)\")",
+      "Bash(python3 filebot.py /Volumes/Torrents --no-tmdb --filter \"28 Years\" --verbose 2>&1)",
+      "Bash(python3 filebot.py /Volumes/Torrents --no-tmdb --filter \"Bluey\" --verbose 2>&1)",
+      "Bash(python3 filebot.py /Volumes/Torrents --no-tmdb --filter \"Leftovers\" --verbose 2>&1)",
+      "Bash(python3 filebot.py /Volumes/Torrents --no-tmdb --filter \"Night Manager\" --verbose 2>&1)",
+      "Bash(ls \"/Volumes/Torrents/Bluey.S01.COMPLETE.720p.DSNP.WEBRip.x264-GalaxyTV[TGx]/\" 2>/dev/null | head -10)",
+      "Bash(ls \"/Volumes/Torrents/The.Night.Manager.S01.1080p.BluRay.x264-SHORTBREHD[rartv]/\" 2>/dev/null | head -10)",
+      "Bash(python3 filebot.py /Volumes/Torrents --no-tmdb --filter \"www.\" --verbose 2>&1)",
+      "Bash(ls \"/Volumes/Torrents/Bluey.S01.COMPLETE.720p.DSNP.WEBRip.x264-GalaxyTV[TGx]/\" 2>/dev/null | head -5; echo \"---\"; find \"/Volumes/Torrents/Bluey.S01.COMPLETE.720p.DSNP.WEBRip.x264-GalaxyTV[TGx]\" -name \"*.mp4\" -o -name \"*.mkv\" 2>/dev/null | head -5)",
+      "Bash(python3 -c \"\nimport os\nentries = os.listdir\\('/Volumes/Torrents'\\)\nbluey = [e for e in entries if 'Bluey' in e or 'bluey' in e]\nprint\\(bluey\\)\nfor b in bluey:\n    path = os.path.join\\('/Volumes/Torrents', b\\)\n    print\\(f'{b}: isdir={os.path.isdir\\(path\\)}'\\)\n    if os.path.isdir\\(path\\):\n        contents = os.listdir\\(path\\)[:5]\n        print\\(f'  contents: {contents}'\\)\n\")",
+      "Bash(python3 -c \"\nimport os\npath = '/Volumes/Torrents/The.Night.Manager.S01.1080p.BluRay.x264-SHORTBREHD[rartv]'\nprint\\(f'exists: {os.path.exists\\(path\\)}'\\)\nprint\\(f'isdir: {os.path.isdir\\(path\\)}'\\)\ncontents = os.listdir\\(path\\)[:5]\nprint\\(f'contents: {contents}'\\)\n\")",
+      "Bash(python3 filebot.py /Volumes/Torrents --no-tmdb 2>&1 | tail -30)",
+      "Bash(python3 filebot.py /Volumes/Torrents --no-tmdb 2>&1 | grep ERROR | head -20)",
+      "Bash(python3 filebot.py /Volumes/Torrents --no-tmdb 2>&1 | grep ERROR | head -3; echo \"---\"; python3 -c \"\nimport os\nfor root, dirs, files in os.walk\\('/Volumes/Torrents'\\):\n    for f in files:\n        if f == 'S01E01.m4v':\n            print\\(os.path.join\\(root, f\\)\\)\n            break\n    else:\n        continue\n    break\n\")",
+      "Bash(python3 filebot.py /Volumes/Torrents --no-tmdb --filter \"Scooby\" --verbose 2>&1 | head -20)",
+      "Bash(TMDB_API_KEY=42e41ebc90757c9dd6d5992a14e5d474 python3 filebot.py /Volumes/Torrents --filter \"Night Manager\" --verbose 2>&1)"
+    ]
+  }
+}
