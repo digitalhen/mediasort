@@ -140,8 +140,7 @@ NOISE_PATTERNS = [
     re.compile(r"\bMp4Ba\b", re.IGNORECASE),
     # File size indicators
     re.compile(r"\b\d{3,4}MB\b"),
-    # Scene group suffixes like -SPARKS, -RARBG
-    re.compile(r"-[A-Za-z0-9]{2,15}(?:[\s.\-]|$)"),
+    # (scene group suffix handled separately in clean_title after whitespace cleanup)
     # Trailing " - GROUP" pattern
     re.compile(r"\s+-\s+[A-Za-z0-9]{2,15}$"),
 ]
@@ -240,6 +239,8 @@ def clean_title(raw: str) -> str:
     name = re.sub(r"[._]", " ", name)
     # Collapse whitespace
     name = re.sub(r"\s+", " ", name).strip()
+    # Strip scene group suffixes like -SPARKS, -RARBG (only at end after cleanup)
+    name = re.sub(r"-[A-Za-z0-9]{2,15}$", "", name)
     # Remove trailing hyphens/dashes
     name = re.sub(r"[\s-]+$", "", name)
 
@@ -962,6 +963,7 @@ def process_file(
     if not parsed["title"]:
         action["status"] = "skipped"
         action["error"] = "Could not parse title"
+        log.info("SKIP: %s (no title parsed)", filepath)
         return action
 
     if parsed["type"] == "tv":
@@ -1025,7 +1027,10 @@ def process_file(
     else:
         action["status"] = "skipped"
         action["error"] = "Could not determine media type"
+        log.info("SKIP: %s (unknown type, title=%s)", filepath, parsed["title"])
         return action
+
+    log.debug("PLAN: %s -> %s (matched=%s)", filepath, action["dest"], action.get("matched"))
 
     # Find associated subtitle files
     if action["dest"]:
@@ -1145,16 +1150,19 @@ def _execute_action(action: dict, move: bool) -> dict:
     os.makedirs(dest_dir, exist_ok=True)
     if os.path.exists(action["dest"]):
         action["status"] = "exists"
+        log.info("EXISTS: %s -> %s", action["source"], action["dest"])
     else:
         _safe_transfer(action["source"], action["dest"], move=move)
         action["status"] = "done"
+        log.info("DONE: %s -> %s", action["source"], action["dest"])
         # Also move/copy associated subtitles
         for sa in action.get("subtitles", []):
             if not os.path.exists(sa["dest"]):
                 try:
                     _safe_transfer(sa["source"], sa["dest"], move=move)
-                except OSError:
-                    pass
+                    log.info("SUB: %s -> %s", sa["source"], sa["dest"])
+                except OSError as e:
+                    log.warning("SUB FAILED: %s -> %s: %s", sa["source"], sa["dest"], e)
     return action
 
 
@@ -1247,6 +1255,7 @@ def cleanup_source_dir(source_dir: str, moved_files: set[str], dry_run: bool = F
                     try:
                         os.remove(fp)
                         cleaned.append(fp)
+                        log.info("CLEANUP DELETE: %s", fp)
                     except OSError:
                         pass
             # Remove empty directories (including the entry dir itself)
@@ -1256,6 +1265,7 @@ def cleanup_source_dir(source_dir: str, moved_files: set[str], dry_run: bool = F
                     if not remaining:
                         os.rmdir(root)
                         cleaned.append(root)
+                        log.info("CLEANUP RMDIR: %s", root)
                 except OSError:
                     pass
             else:
