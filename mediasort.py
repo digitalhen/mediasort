@@ -754,7 +754,7 @@ def is_game_release(path: str) -> bool:
 DOWNLOAD_MARKER_EXTS = {".part", ".!qb", ".aria2", ".downloading", ".crdownload", ".tmp"}
 
 # Minimum file age in seconds before processing (avoids grabbing active downloads)
-DEFAULT_MIN_FILE_AGE = 300  # 5 minutes
+DEFAULT_MIN_FILE_AGE = 900  # 15 minutes
 
 
 def is_downloading(filepath: str, min_age: int = DEFAULT_MIN_FILE_AGE) -> bool:
