@@ -753,9 +753,16 @@ def is_game_release(path: str) -> bool:
 # Extensions that indicate a file is still being downloaded
 DOWNLOAD_MARKER_EXTS = {".part", ".!qb", ".aria2", ".downloading", ".crdownload", ".tmp"}
 
+# Minimum file age in seconds before processing (avoids grabbing active downloads)
+DEFAULT_MIN_FILE_AGE = 300  # 5 minutes
 
-def is_downloading(filepath: str) -> bool:
-    """Check if a file appears to still be downloading."""
+
+def is_downloading(filepath: str, min_age: int = DEFAULT_MIN_FILE_AGE) -> bool:
+    """Check if a file appears to still be downloading.
+
+    Checks marker files, file extension, and file age (mtime).
+    Files modified within *min_age* seconds are considered still in progress.
+    """
     # Check for download marker files alongside the video
     for ext in DOWNLOAD_MARKER_EXTS:
         if os.path.exists(filepath + ext):
@@ -763,25 +770,44 @@ def is_downloading(filepath: str) -> bool:
     # Check if the file itself is a partial download
     if os.path.splitext(filepath)[1].lower() in DOWNLOAD_MARKER_EXTS:
         return True
+    # Check file age — skip files modified recently (likely still being written)
+    if min_age > 0:
+        try:
+            mtime = os.path.getmtime(filepath)
+            age = time.time() - mtime
+            if age < min_age:
+                log.debug("Skipping (modified %ds ago, min_age=%ds): %s",
+                          int(age), min_age, filepath)
+                return True
+        except OSError:
+            pass
     return False
 
 
-def is_dir_downloading(dirpath: str) -> bool:
-    """Check if any files in a directory are still downloading."""
-    for _, _, files in os.walk(dirpath):
+def is_dir_downloading(dirpath: str, min_age: int = DEFAULT_MIN_FILE_AGE) -> bool:
+    """Check if any files in a directory are still downloading or recently modified."""
+    for root, _, files in os.walk(dirpath):
         for f in files:
             if os.path.splitext(f)[1].lower() in DOWNLOAD_MARKER_EXTS:
                 return True
+            # Check if any file in the directory was modified recently
+            if min_age > 0:
+                try:
+                    fpath = os.path.join(root, f)
+                    if time.time() - os.path.getmtime(fpath) < min_age:
+                        return True
+                except OSError:
+                    pass
     return False
 
 
-def find_video_files(path: str) -> list[str]:
+def find_video_files(path: str, min_age: int = DEFAULT_MIN_FILE_AGE) -> list[str]:
     """Recursively find all video files under a path."""
     videos = []
     if os.path.isfile(path):
         if (os.path.splitext(path)[1].lower() in VIDEO_EXTENSIONS
                 and not is_junk_file(os.path.basename(path))
-                and not is_downloading(path)):
+                and not is_downloading(path, min_age)):
             videos.append(path)
         return videos
 
@@ -790,7 +816,7 @@ def find_video_files(path: str) -> list[str]:
         return videos
 
     # Skip directories with active downloads
-    if os.path.isdir(path) and is_dir_downloading(path):
+    if os.path.isdir(path) and is_dir_downloading(path, min_age):
         return videos
 
     for root, dirs, files in os.walk(path):
@@ -803,7 +829,7 @@ def find_video_files(path: str) -> list[str]:
             ext = os.path.splitext(f)[1].lower()
             if ext in VIDEO_EXTENSIONS and not is_junk_file(f):
                 fp = os.path.join(root, f)
-                if not is_downloading(fp):
+                if not is_downloading(fp, min_age):
                     videos.append(fp)
     return videos
 
@@ -1193,13 +1219,14 @@ def process_directory_entry(
     probe_timeout: int = 30,
     movie_template: str | None = None,
     tv_template: str | None = None,
+    min_age: int = DEFAULT_MIN_FILE_AGE,
 ) -> list[dict]:
     """Process a top-level directory entry (file or folder) from the source.
 
     Detects collection directories (multiple distinct movies in one folder)
     and processes each movie individually rather than inheriting the folder title.
     """
-    videos = find_video_files(entry_path)
+    videos = find_video_files(entry_path, min_age=min_age)
     results = []
 
     is_collection = _is_collection_dir(entry_path, videos)
@@ -1518,10 +1545,12 @@ def run_once(args) -> int:
 
     for entry in entries:
         entry_path = os.path.join(args.source, entry)
+        min_age = getattr(args, "min_age", DEFAULT_MIN_FILE_AGE)
         results = process_directory_entry(entry_path, args.movies, args.tv, tmdb,
                                           dry_run=True, move=move, probe=probe,
                                           probe_timeout=probe_timeout,
-                                          movie_template=movie_template, tv_template=tv_template)
+                                          movie_template=movie_template, tv_template=tv_template,
+                                          min_age=min_age)
         if not results:
             continue
         for r in results:
@@ -1690,6 +1719,9 @@ def main():
                         help="Custom TV path template (variables: {show}, {season}, {episode}, {episode_title}, {season_folder}, {quality}, {ext})")
     parser.add_argument("--watch", "-w", type=int, default=None, metavar="SECONDS",
                         help="Watch mode: re-scan every N seconds (e.g. --watch 300 for 5 minutes)")
+    parser.add_argument("--min-age", type=int, default=DEFAULT_MIN_FILE_AGE, metavar="SECONDS",
+                        help="Minimum file age in seconds before processing; files modified more recently are "
+                             "skipped as likely still downloading (default: %(default)s)")
     parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"],
                         help="Logging level (default: INFO)")
 
